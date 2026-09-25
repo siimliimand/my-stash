@@ -1,36 +1,56 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# My Stash
 
-## Getting Started
+A mobile-first microlearning PWA — browse, save, and review bite-sized idea cards. Entirely client-side, no backend required.
 
-First, run the development server:
+## Stack
+
+- **Next.js 16** (App Router, static export)
+- **TypeScript** (strict mode)
+- **Tailwind CSS v4**
+- **shadcn/ui v4** (base-ui components)
+- **Lucide React** (icons)
+- **Framer Motion** (card swipe & transitions)
+- **Zod** (runtime validation)
+
+## Development
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Production Build
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run build
+# Output goes to: out/
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+> Preview locally with: `npx serve out`
 
-## Learn More
+## Cloudflare Pages Deployment
 
-To learn more about Next.js, take a look at the following resources:
+| Setting | Value |
+|---|---|
+| Build command | `next build` |
+| Output directory | `out` |
+| Node version | `22` |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+The `public/_headers` file sets `Cache-Control: no-cache` on `sw.js` so the service worker is always refreshed.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Node Version
 
-## Deploy on Vercel
+Node 22 (see `.node-version` if pinned).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Features
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- 📚 **Card deck** — swipe left/right on mobile, arrow keys on desktop
+- 🔍 **Search** — debounced full-text search across title/body/source
+- 🏷️ **Tags + stashes** — filter by tags or user-created collections
+- ⭐ **Favorites** — quick-access heart toggle
+- ✨ **Daily Review Mode** — weighted review session (recency + favorites)
+- 💾 **localStorage persistence** — debounced writes, Zod-validated reads
+- 📤 **Export / Import** — JSON backup/restore
+- 🌙 **Light/dark/system theme**
+- 📱 **PWA** — installable, works offline after first load
+- ♿ **Accessible** — ARIA labels, keyboard navigation throughout

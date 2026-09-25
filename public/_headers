@@ -1,0 +1,7 @@
+# Prevent aggressive caching of service worker so updates are picked up
+/sw.js
+  Cache-Control: no-cache, no-store, must-revalidate
+
+# Allow PWA to function correctly
+/manifest.json
+  Content-Type: application/manifest+json
