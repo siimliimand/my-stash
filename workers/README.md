@@ -14,7 +14,7 @@ workers/
 │   ├── routes/
 │   │   ├── cards.ts          # GET /api/cards, GET /api/cards/today
 │   │   ├── stats.ts          # GET /api/stats
-│   │   └── admin.ts          # POST /api/generate (secret-gated)
+│   │   └── admin.ts          # POST /api/generate + /api/run-sync (secret-gated)
 │   ├── generation/
 │   │   ├── pipeline.ts       # runGeneration() — plan §6 steps 1–10
 │   │   ├── topic-map.ts      # coverage map load/validate/merge (+ local fallback)
@@ -115,9 +115,20 @@ Run from `workers/`. Replace the three placeholders in `wrangler.jsonc` first:
      -H "Authorization: Bearer $ADMIN_SECRET" \
      -H "Content-Type: application/json" \
      -d '{"requested": 50}'
-   # -> 202 {"status":"started","batchDate":"2026-09-25"}
-   # poll:
+   # -> 202 {"status":"queued","batchDate":"2026-09-25"}
+   # the */15 cron poller picks the run up within <= 15 minutes; poll:
    curl https://my-stash-api.workers.dev/api/stats
+   ```
+
+   While cron events are not being delivered for this worker (see deviation
+   #18), the poller never fires — trigger the batch synchronously instead:
+
+   ```bash
+   curl -X POST https://my-stash-api.workers.dev/api/run-sync \
+     -H "Authorization: Bearer $ADMIN_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"requested": 50}'
+   # -> 200 {"status":"completed","batchDate":"2026-09-25",...} after ~90 s
    ```
 
 8. Point the frontend at the Worker: set
@@ -136,6 +147,7 @@ Run from `workers/`. Replace the three placeholders in `wrangler.jsonc` first:
 | `GET /api/cards/today` | public | KV 6h (`api-cache:today`, invalidated by the pipeline), `Cache-Control: public, max-age=300, stale-while-revalidate=21000` |
 | `GET /api/stats` | public | none server-side, `max-age=300` |
 | `POST /api/generate` | `Authorization: Bearer $ADMIN_SECRET` | `no-store` |
+| `POST /api/run-sync` | `Authorization: Bearer $ADMIN_SECRET` | `no-store` |
 
 Notes:
 
@@ -148,13 +160,35 @@ Notes:
 - `POST /api/generate` body is optional; `{ "requested": n }` clamps 1–50.
   If today already produced cards (`success`, or `partial` with
   `generated > 0` in `generation_log`), it returns
-  `200 {"status":"already_completed", ...}`; a day with zero cards
-  (`failed`, or a 0-card `partial`) can be retried. Otherwise
-  `202 {"status":"started", ...}` and the pipeline runs via `ctx.waitUntil`.
-  If another run (cron or admin) is already in flight, the pipeline skips
-  itself with `status: "skipped", reason: "lock-held"` — a partial UNIQUE
-  index on `generation_log(batch_date) WHERE status = 'running'` enforces one
-  run per day, and locks whose isolate died are swept after 30 minutes.
+  `200 {"status":"already_completed", ...}` and nothing is queued; a day with
+  zero cards (`failed`, or a 0-card `partial`) can be retried. Otherwise it
+  returns `202 {"status":"queued","batchDate":"<today>"}` — the request is
+  written to the `run_requests` D1 table and the `*/15 * * * *` cron poller
+  consumes it (oldest first) and runs the pipeline inside a cron invocation's
+  15-minute budget, so a manual run lands **within at most 15 minutes**, not
+  immediately. The daily 05:00 cron is unchanged. If another run (cron or
+  admin) is already in flight, the pipeline skips itself with
+  `status: "skipped", reason: "lock-held"` — a partial UNIQUE index on
+  `generation_log(batch_date) WHERE status = 'running'` enforces one run per
+  day, and locks whose isolate died are swept after 30 minutes. (Why queued
+  instead of started: see deviations #17.)
+- `POST /api/run-sync` is the synchronous twin of `POST /api/generate` (same
+  bearer auth, same optional `{ "requested": n }` body): it AWAITS the
+  pipeline inline and only responds when the batch is done (~90 s — keep the
+  client timeout generous). Returns `200 {"status":"completed", ...}` with the
+  pipeline's counts, `200 {"status":"already_completed", ...}` when the day
+  was already done or another run holds the D1 lock, and
+  `502 {"error":"generation_failed", ...}` when the run failed or crashed
+  (the attempt is already logged in `generation_log`; a failed day stays
+  retryable). It exists because cron events are currently not delivered for
+  this worker — see deviation #18.
+- Cron triggers are `["0 5 * * *", "*/15 * * * *"]`: the daily batch, plus the
+  poller that executes queued manual runs. Both fire at 05:00:00; the D1 run
+  lock turns that overlap into a no-op skip for the second fire (it only
+  warns — no rows are written). Currently, however, no cron events are being
+  delivered at all (registered but zero scheduled events observed — see
+  deviation #18), so `POST /api/run-sync` is the working execution path until
+  delivery resumes.
 - When `OPENROUTER_API_KEY` is unset, the read endpoints keep working; only
   generation returns `503 {"error":"generation not configured"}` (see
   deviations).
@@ -283,3 +317,51 @@ stricter-prompt retry; if every attempt still fails, the thrown error mentions
     `existingTotal + newTopics.length + 10` slugs (counted across all
     categories/subcategories) is rejected in favor of the deterministic local
     merge, guarding against runaway invented slugs.
+17. **`POST /api/generate` responds `202 {"status":"queued", ...}` instead of
+    the plan's `{"status":"started", ...}` and runs from a cron, not from
+    `ctx.waitUntil`** — the plan (§7) fires the pipeline via
+    `ctx.waitUntil(pipeline())` off the HTTP fetch event. Production showed
+    that does not survive contact with the real runtime: waitUntil promises on
+    an HTTP fetch event are killed ~30 seconds after the response is sent,
+    while the pipeline takes ~77 s (measured locally — local `wrangler dev`
+    does NOT enforce the ceiling, which is why it passed there). The isolate
+    died mid-run and left a stranded `'running'` row in `generation_log` with
+    zero cards. Cron invocations get a 15-minute wall-time budget, so manual
+    runs are now queued in a `run_requests` D1 table and executed by a new
+    `*/15 * * * *` poller cron (claim-before-run: the row is deleted before the
+    pipeline starts, so a failed attempt is recorded in `generation_log`
+    instead of dangling in the queue). The daily 05:00 batch is unchanged; when
+    both crons fire together at 05:00:00, the D1 run lock makes the second
+    fire a `lock-held` skip that writes nothing.
+18. **Cron triggers are registered, but no cron events are being delivered;
+    `POST /api/run-sync` added as the synchronous execution path** — on the
+    deployed worker both triggers were registered correctly, yet 10+ minutes
+    of `wrangler tail` showed zero `scheduled` invocations while ordinary
+    HTTP requests kept flowing (an every-minute trigger was added as a
+    diagnostic and produced no events either — the platform is not delivering
+    cron events for this worker at all; investigation ongoing). Until
+    delivery resumes, neither the 05:00 batch nor #17's poller can execute
+    anything, so `/api/run-sync` runs the pipeline synchronously inside the
+    HTTP request: same admin bearer auth and optional `{ "requested": n }`
+    body as `/api/generate`, but it awaits `runGeneration` and returns the
+    outcome — `200 {"status":"completed", ...}`, `200
+    {"status":"already_completed", ...}` when the guard/lock skipped the run,
+    or `502 {"error":"generation_failed", ...}` when it failed or crashed.
+    Inlining is safe even though #17 showed post-response `waitUntil` is
+    killed at ~30 s: that ceiling applies only to promises still running
+    AFTER the response — an in-flight awaited request keeps the isolate alive
+    with no such ceiling, and the pipeline is I/O-bound (~90 s wall, ~0 ms
+    CPU, well under the free tier's 10 ms CPU cap). Concurrent or duplicate
+    invocations stay safe without the queue: the D1 run lock (#13) plus the
+    idempotency guard make every loser a `lock-held`/`already_completed`
+    no-op. The crons remain registered and dormant-safe — the queue/poller
+    machinery is untouched (its diagnostic every-minute cadence was reverted
+    to `*/15`), and both resume automatically if delivery resumes:
+
+    ```bash
+    curl -X POST https://my-stash-api.workers.dev/api/run-sync \
+      -H "Authorization: Bearer $ADMIN_SECRET" \
+      -H "Content-Type: application/json" \
+      -d '{"requested": 50}'
+    # -> 200 {"status":"completed","batchDate":"<today>",...} after ~90 s
+    ```

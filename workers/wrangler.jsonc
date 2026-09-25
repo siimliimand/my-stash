@@ -25,7 +25,22 @@
     }
   ],
   "triggers": {
-    "crons": ["0 5 * * *"]
+    // "0 5 * * *"     — the daily generation batch (05:00 UTC).
+    // "*/15 * * * *"  — poller that executes manual runs queued by
+    //                   POST /api/generate. waitUntil promises on an HTTP
+    //                   fetch event are killed ~30 s after the response on the
+    //                   real runtime, while the pipeline needs ~77 s — a cron
+    //                   invocation gets a 15-minute budget, so the manual run
+    //                   is executed from here (run_requests table in D1).
+    // Both fire at 05:00:00; the pipeline's D1 run lock turns the overlap
+    // into a no-op skip for whichever fire comes second.
+    // NOTE: cron delivery is currently NOT arriving for this worker — the
+    // triggers are registered correctly, but zero scheduled events have been
+    // observed (platform issue under investigation, README "Deviations" #18).
+    // Until that is resolved, POST /api/run-sync is the working execution
+    // path; both crons resume automatically if delivery resumes. The queue/
+    // poller machinery above is correct and simply dormant.
+    "crons": ["0 5 * * *", "*/15 * * * *"]
   },
   "vars": {
     // "~" prefix is OpenRouter's family alias — resolves to the latest Luna model.

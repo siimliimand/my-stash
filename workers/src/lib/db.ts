@@ -386,3 +386,36 @@ export async function finalizeRunLog(db: D1Database, lockId: string | null, entr
   }
   return logGeneration(db, entry);
 }
+
+/** A claimed manual-run request, ready to be handed to the pipeline. */
+export interface QueuedRun {
+  requested: number;
+}
+
+// Queue a manual generation request (POST /api/generate). Executed later by
+// the every-15-minutes cron poller: waitUntil promises on an HTTP fetch event
+// are killed ~30 s after the response on the real runtime — too short for the
+// ~77 s pipeline — while a cron invocation gets a 15-minute budget.
+export async function queueRunRequest(db: D1Database, batchDate: string, requested: number): Promise<void> {
+  await db
+    .prepare('INSERT INTO run_requests (id, batch_date, requested, created_at) VALUES (?, ?, ?, ?)')
+    .bind(crypto.randomUUID(), batchDate, requested, new Date().toISOString())
+    .run();
+}
+
+// Atomically claim + remove the OLDEST pending run request for a date
+// (created_at is ISO text, so it orders lexicographically; rowid breaks ties
+// within the same millisecond). Claim happens BEFORE the run: if the DELETE
+// reports 0 changes another consumer already took the row between our SELECT
+// and DELETE — return null rather than double-running. (The pipeline's D1
+// run lock still backstops a true concurrent double-run.)
+export async function consumeRunRequest(db: D1Database, batchDate: string): Promise<QueuedRun | null> {
+  const row = await db
+    .prepare('SELECT id, requested FROM run_requests WHERE batch_date = ? ORDER BY created_at ASC, rowid ASC LIMIT 1')
+    .bind(batchDate)
+    .first<{ id: string; requested: number }>();
+  if (row === null) return null;
+  const deleted = await db.prepare('DELETE FROM run_requests WHERE id = ?').bind(row.id).run();
+  if ((deleted.meta?.changes ?? 0) === 0) return null;
+  return { requested: row.requested };
+}

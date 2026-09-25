@@ -3,16 +3,17 @@
  * runtime needed. Storage fakes:
  *
  * - DB: real SQLite via node:sqlite (Node >= 22.5) running the REAL
- *   schema.sql, wrapped in a minimal D1Database-shaped adapter (prepare /
- *   bind / first / all / run / batch with transactional semantics). The
- *   UNIQUE(title_hash) constraint is therefore enforced by a real SQLite
- *   engine, exactly as D1 would.
+ *   schema.sql (including the run_requests manual-run queue), wrapped in a
+ *   minimal D1Database-shaped adapter (prepare / bind / first / all / run /
+ *   batch with transactional semantics). The UNIQUE(title_hash) constraint is
+ *   therefore enforced by a real SQLite engine, exactly as D1 would.
  * - KV: in-memory namespace implementing get/put/delete/list with cursors.
  * - AI: global fetch is stubbed with a scripted OpenRouter server that
  *   recognizes each pipeline call by its prompt and replies with JSON.
  *
  * The REAL pipeline (runGeneration), REAL cron handler, and REAL route
- * handlers (handleToday, handleCards, handleGenerate) run against them.
+ * handlers (handleToday, handleCards, handleGenerate, handleRunSync) run
+ * against them.
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -23,10 +24,11 @@ import { fileURLToPath } from 'node:url';
 
 import worker from '../src/index';
 import { handleCards, handleToday } from '../src/routes/cards';
-import { handleGenerate } from '../src/routes/admin';
+import { handleGenerate, handleRunSync } from '../src/routes/admin';
 import { runGeneration } from '../src/generation/pipeline';
 import { normalizeTitle, sha256Prefix } from '../src/generation/dedup';
 import { mergeTopicsDeterministic } from '../src/generation/topic-map';
+import { consumeRunRequest, queueRunRequest } from '../src/lib/db';
 import { withCors } from '../src/lib/cors';
 import type { Env, NewTopic, TopicCoverageMap } from '../src/lib/types';
 
@@ -382,13 +384,18 @@ function stubFetch(script: AiScript): void {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-async function runCron(h: TestHarness): Promise<void> {
+async function runCron(h: TestHarness, cron = '0 5 * * *'): Promise<void> {
   const controller = {
-    cron: '0 5 * * *',
+    cron,
     scheduledTime: Date.now(),
   } as unknown as ScheduledController;
   await worker.scheduled(controller, h.env, h.ctx as unknown as ExecutionContext);
   await h.ctx.settle();
+}
+
+// The every-15-minutes poller fire that executes queued manual runs.
+async function runPoller(h: TestHarness): Promise<void> {
+  await runCron(h, '*/15 * * * *');
 }
 
 async function runAdmin(h: TestHarness, init?: RequestInit): Promise<Response> {
@@ -396,7 +403,17 @@ async function runAdmin(h: TestHarness, init?: RequestInit): Promise<Response> {
     method: 'POST',
     ...init,
   });
-  return handleGenerate(request, h.env, h.ctx as unknown as ExecutionContext, withCors(h.env));
+  return handleGenerate(request, h.env, withCors(h.env));
+}
+
+// The synchronous twin: same env/auth, but the pipeline runs INLINE and the
+// response only arrives once the batch is done.
+async function runSync(h: TestHarness, init?: RequestInit): Promise<Response> {
+  const request = new Request('https://api.test/api/run-sync', {
+    method: 'POST',
+    ...init,
+  });
+  return handleRunSync(request, h.env, withCors(h.env), h.ctx as unknown as ExecutionContext);
 }
 
 interface CardRow {
@@ -799,13 +816,16 @@ describe('admin route, auth and CORS', () => {
     const secret503 = await runAdmin(noAdminSecret);
     expect(secret503.status).toBe(503);
 
-    const started = await runAdmin(h, {
+    const queued = await runAdmin(h, {
       headers: { Authorization: 'Bearer test-admin-secret', 'Content-Type': 'application/json' },
       body: JSON.stringify({ requested: 50 }),
     });
-    expect(started.status).toBe(202);
-    expect(await started.json()).toEqual({ status: 'started', batchDate: today });
-    await h.ctx.settle();
+    expect(queued.status).toBe(202);
+    // 202 = QUEUED (not 'started') — the */15 poller executes it. See the
+    // 'manual run queue' describe below and README deviation #17.
+    expect(await queued.json()).toEqual({ status: 'queued', batchDate: today });
+    expect(h.db.count('run_requests')).toBe(1);
+    await runPoller(h);
     expect(h.db.count('generated_cards')).toBe(50);
 
     const again = await runAdmin(h, { headers: { Authorization: 'Bearer test-admin-secret' } });
@@ -838,5 +858,233 @@ describe('admin route, auth and CORS', () => {
 
     const generate = await runGeneration(h.env, h.ctx as unknown as ExecutionContext, { requested: 1 });
     expect(generate.status).toBe('skipped');
+  });
+});
+
+describe('admin run-sync (POST /api/run-sync — pipeline awaited inline)', () => {
+  function insertSuccessRow(db: FakeD1, batchDate: string): void {
+    db.sqlite
+      .prepare(
+        `INSERT INTO generation_log (id, batch_date, requested, generated, duplicates_skip, duration_ms, model, status, error, created_at)
+         VALUES (?, ?, 50, 50, 0, 0, 'test-model', 'success', NULL, ?)`,
+      )
+      .run(crypto.randomUUID(), batchDate, new Date().toISOString());
+  }
+
+  test('401 without/with-wrong bearer, 503 without ADMIN_SECRET, 503 without OPENROUTER_API_KEY', async () => {
+    stubFetch(defaultScript);
+
+    const noAuth = await runSync(h);
+    expect(noAuth.status).toBe(401);
+
+    const wrongAuth = await runSync(h, { headers: { Authorization: 'Bearer wrong-secret' } });
+    expect(wrongAuth.status).toBe(401);
+
+    const noAdminSecret = makeHarness({ ADMIN_SECRET: undefined });
+    const secret503 = await runSync(noAdminSecret);
+    expect(secret503.status).toBe(503);
+
+    const noKey = makeHarness({ OPENROUTER_API_KEY: undefined });
+    const gen503 = await runSync(noKey, { headers: { Authorization: 'Bearer test-admin-secret' } });
+    expect(gen503.status).toBe(503);
+
+    // Nothing was generated, logged, or queued by the rejected calls.
+    expect(h.db.count('generated_cards')).toBe(0);
+    expect(h.db.count('generation_log')).toBe(0);
+    expect(h.db.count('run_requests')).toBe(0);
+  });
+
+  test('400 on invalid JSON body and on a non-numeric requested', async () => {
+    stubFetch(defaultScript);
+    const auth = { Authorization: 'Bearer test-admin-secret' };
+
+    const badJson = await runSync(h, { headers: auth, body: '{nope' });
+    expect(badJson.status).toBe(400);
+    expect(await badJson.json()).toEqual({ error: 'invalid json body' });
+
+    const badRequested = await runSync(h, {
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requested: 'fifty' }),
+    });
+    expect(badRequested.status).toBe(400);
+    expect(await badRequested.json()).toEqual({ error: 'invalid requested value' });
+
+    expect(h.db.count('generated_cards')).toBe(0);
+    expect(h.db.count('generation_log')).toBe(0);
+  });
+
+  test('already_completed fast-path: a success row for today short-circuits with NO AI call', async () => {
+    const fetchMock = vi.fn(async () => new Response('no AI call expected', { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+    insertSuccessRow(h.db, today);
+
+    const res = await runSync(h, { headers: { Authorization: 'Bearer test-admin-secret' } });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'already_completed', batchDate: today });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(h.db.count('generated_cards')).toBe(0);
+    // Executed inline means never queued.
+    expect(h.db.count('run_requests')).toBe(0);
+  });
+
+  test('happy path: awaits the pipeline inline — 200 completed, cards land in D1, nothing queued', async () => {
+    stubFetch(defaultScript);
+
+    const res = await runSync(h, {
+      headers: { Authorization: 'Bearer test-admin-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requested: 5 }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      status: 'completed',
+      batchDate: today,
+      requested: 5,
+      generated: 5,
+      skippedDuplicates: 0,
+      durationMs: expect.any(Number),
+      // Fresh harness: no KV map seeded, so the pipeline notes its fallback.
+      warnings: ['topic-coverage-map missing or corrupt in KV; using the baked-in default map'],
+    });
+    expect(h.db.count('generated_cards')).toBe(5);
+    expect(h.db.count('run_requests')).toBe(0);
+    expect(h.db.rows<{ status: string; requested: number }>('SELECT status, requested FROM generation_log')[0]).toMatchObject({
+      status: 'success',
+      requested: 5,
+    });
+  });
+
+  test('failure path: hard AI failure → 502 generation_failed, run logged as failed, day retryable', async () => {
+    // Non-retryable 401 with a non-JSON body on the title call: the pipeline
+    // catches it, finalizes generation_log as 'failed', and RESOLVES with
+    // status 'failed' — which the endpoint reports as 502 so an operator is
+    // not told a dead run completed.
+    stubFetch((kind) => (kind === 'title' ? new Response('provider exploded', { status: 401 }) : defaultScript(kind, '')));
+
+    const res = await runSync(h, { headers: { Authorization: 'Bearer test-admin-secret' } });
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: 'generation_failed', detail: expect.any(String) });
+    expect(h.db.count('generated_cards')).toBe(0);
+    expect(h.db.rows<{ status: string }>('SELECT status FROM generation_log')[0].status).toBe('failed');
+    expect(h.db.count('run_requests')).toBe(0);
+
+    // A failed day is retryable: the healthy retry completes inline.
+    stubFetch(defaultScript);
+    const retry = await runSync(h, { headers: { Authorization: 'Bearer test-admin-secret' } });
+    expect(retry.status).toBe(200);
+    expect(((await retry.json()) as { status: string }).status).toBe('completed');
+    expect(h.db.count('generated_cards')).toBe(50);
+  });
+
+  test('worker.fetch dispatch: POST /api/run-sync runs inline, GET is a 405', async () => {
+    stubFetch(defaultScript);
+    const fetchHandler = worker.fetch as (req: Request, env: Env, ctx: ExecutionContext) => Promise<Response>;
+    const ctx = h.ctx as unknown as ExecutionContext;
+
+    const notAllowed = await fetchHandler(new Request('https://api.test/api/run-sync'), h.env, ctx);
+    expect(notAllowed.status).toBe(405);
+
+    const res = await fetchHandler(
+      new Request('https://api.test/api/run-sync', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer test-admin-secret' },
+      }),
+      h.env,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { status: string }).status).toBe('completed');
+    expect(h.db.count('generated_cards')).toBe(50);
+    await h.ctx.settle(); // cache invalidation was handed to waitUntil
+  });
+});
+
+describe('manual run queue (POST /api/generate → run_requests → */15 poller)', () => {
+  test('queue → consume returns it → the scheduled-handler path generates the cards', async () => {
+    stubFetch(defaultScript);
+
+    await queueRunRequest(h.env.DB, today, 3);
+    expect(h.db.count('run_requests')).toBe(1);
+    // Consume claims AND removes: a second consumer finds nothing.
+    expect(await consumeRunRequest(h.env.DB, today)).toEqual({ requested: 3 });
+    expect(h.db.count('run_requests')).toBe(0);
+
+    // Re-queue and let the REAL scheduled handler pick it up (poller cron).
+    await queueRunRequest(h.env.DB, today, 5);
+    await runPoller(h);
+
+    expect(h.db.count('generated_cards')).toBe(5);
+    const log = h.db.rows<{ status: string; requested: number }>('SELECT status, requested FROM generation_log');
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({ status: 'success', requested: 5 });
+    expect(h.db.count('run_requests')).toBe(0);
+  });
+
+  test('poller cron with NO pending request is a no-op — no AI call, no log row', async () => {
+    const fetchMock = vi.fn(async () => new Response('no AI call expected', { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await runPoller(h);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(h.db.count('generated_cards')).toBe(0);
+    expect(h.db.count('generation_log')).toBe(0);
+    expect(h.db.count('run_requests')).toBe(0);
+  });
+
+  test('two consumeRunRequest calls for one queued request → the second gets null (oldest first)', async () => {
+    await queueRunRequest(h.env.DB, today, 10);
+    expect(await consumeRunRequest(h.env.DB, today)).toEqual({ requested: 10 });
+    expect(await consumeRunRequest(h.env.DB, today)).toBeNull();
+
+    // Two queued: FIFO by created_at (rowid breaks same-millisecond ties).
+    await queueRunRequest(h.env.DB, today, 1);
+    await queueRunRequest(h.env.DB, today, 2);
+    expect(await consumeRunRequest(h.env.DB, today)).toEqual({ requested: 1 });
+    expect(await consumeRunRequest(h.env.DB, today)).toEqual({ requested: 2 });
+    expect(await consumeRunRequest(h.env.DB, today)).toBeNull();
+  });
+
+  test('admin POST on a fresh day → 202 queued + a run_requests row and NO generation_log row; the poller then generates', async () => {
+    stubFetch(defaultScript);
+
+    const res = await runAdmin(h, { headers: { Authorization: 'Bearer test-admin-secret' } });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ status: 'queued', batchDate: today });
+
+    // Queued, not started: no pipeline attempt has happened yet.
+    expect(h.db.count('run_requests')).toBe(1);
+    expect(h.db.count('generation_log')).toBe(0);
+    expect(h.db.count('generated_cards')).toBe(0);
+
+    await runPoller(h);
+    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('run_requests')).toBe(0);
+    expect(h.db.rows<{ status: string }>('SELECT status FROM generation_log')[0].status).toBe('success');
+  });
+
+  test('admin POST when the day is already completed → 200 already_completed, nothing queued', async () => {
+    stubFetch(defaultScript);
+    await runCron(h);
+    expect(h.db.count('generated_cards')).toBe(50);
+
+    const res = await runAdmin(h, { headers: { Authorization: 'Bearer test-admin-secret' } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'already_completed', batchDate: today });
+    expect(h.db.count('run_requests')).toBe(0);
+    expect(h.db.count('generation_log')).toBe(1); // only the cron's row
+  });
+
+  test('daily cron (0 5 * * *) with NO pending request still runs the pipeline', async () => {
+    stubFetch(defaultScript);
+    expect(h.db.count('run_requests')).toBe(0);
+
+    await runCron(h); // helper fires controller.cron = '0 5 * * *'
+
+    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generation_log')).toBe(1);
+    expect(h.db.rows<{ status: string }>('SELECT status FROM generation_log')[0].status).toBe('success');
   });
 });

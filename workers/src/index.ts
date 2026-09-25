@@ -4,8 +4,21 @@
  *   GET  /api/cards        paginated card list
  *   GET  /api/cards/today  today's batch (falls back to latest batch)
  *   GET  /api/stats        aggregate stats
- *   POST /api/generate     admin secret-gated generation trigger
- *   cron 0 5 * * *         daily generation (05:00 UTC)
+ *   POST /api/generate     admin secret-gated generation trigger (QUEUES a
+ *                          run for the poller; the synchronous alternative
+ *                          is /api/run-sync)
+ *   POST /api/run-sync     admin trigger that AWAITS the pipeline inline —
+ *                          cron events are currently not delivered for this
+ *                          worker (README "Deviations" #18), so this is the
+ *                          working execution path
+ *
+ * Crons:
+ *   0 5 * * *      daily generation batch (05:00 UTC)
+ *   * /15 * * * *  poller that executes queued manual runs (POST
+ *                  /api/generate) inside a cron invocation's 15-minute
+ *                  budget — waitUntil on an HTTP fetch event is killed ~30 s
+ *                  after the response, too short for the ~77 s pipeline.
+ *                  (Currently dormant: see /api/run-sync above.)
  *
  * When OPENROUTER_API_KEY is unset the read endpoints keep working — only
  * generation returns 503 (PM override of plan §13; documented in README).
@@ -13,12 +26,13 @@
 
 import { handleCards, handleToday } from './routes/cards';
 import { handleStats } from './routes/stats';
-import { handleGenerate } from './routes/admin';
+import { handleGenerate, handleRunSync } from './routes/admin';
 import { jsonResponse, optionsResponse, withCors } from './lib/cors';
+import { consumeRunRequest } from './lib/db';
 import { runGeneration } from './generation/pipeline';
 import type { Env } from './lib/types';
 
-const KNOWN_PATHS = new Set(['/api/cards', '/api/cards/today', '/api/stats', '/api/generate']);
+const KNOWN_PATHS = new Set(['/api/cards', '/api/cards/today', '/api/stats', '/api/generate', '/api/run-sync']);
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -35,7 +49,10 @@ export default {
       if (path === '/api/cards/today' && request.method === 'GET') return await handleToday(request, env, cors);
       if (path === '/api/stats' && request.method === 'GET') return await handleStats(request, env, cors);
       if (path === '/api/generate' && request.method === 'POST') {
-        return await handleGenerate(request, env, ctx, cors);
+        return await handleGenerate(request, env, cors);
+      }
+      if (path === '/api/run-sync' && request.method === 'POST') {
+        return await handleRunSync(request, env, cors, ctx);
       }
 
       if (KNOWN_PATHS.has(path)) {
@@ -51,8 +68,31 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     console.log(`[cron] fired ${controller.cron} at ${new Date(controller.scheduledTime).toISOString()}`);
     try {
+      const today = new Date(controller.scheduledTime).toISOString().slice(0, 10);
+      const isDailyCron = controller.cron === '0 5 * * *';
+
+      // Claim a queued manual run BEFORE deciding (claim-before-run): the row
+      // is deleted up front so it can never dangle — if the run then fails,
+      // the pipeline's generation_log row records the attempt. Two concurrent
+      // consumers cannot take the same row (the DELETE's changes = 0 loses the
+      // race), and the pipeline's D1 lock backstops the rest.
+      let manual: { requested: number } | null = null;
+      try {
+        manual = await consumeRunRequest(env.DB, today);
+      } catch (err) {
+        // D1 unavailable: the daily cron still attempts its run (the 05:00
+        // behavior is unchanged); the poller must NOT fire AI calls on a
+        // failed lookup — a queued request simply waits for the next fire.
+        console.error('[cron] run_requests lookup failed:', err instanceof Error ? err.message : err);
+        if (!isDailyCron) return;
+      }
+
+      // */15 poller with nothing queued: no-op, no AI calls.
+      if (!isDailyCron && manual === null) return;
+      const requested = manual?.requested ?? 50;
+
       ctx.waitUntil(
-        runGeneration(env, ctx, { requested: 50 })
+        runGeneration(env, ctx, { requested })
           .then((result) => console.log('[cron] generation result:', JSON.stringify(result)))
           .catch((err: unknown) => {
             console.error('[cron] generation failed:', err instanceof Error ? err.message : err);

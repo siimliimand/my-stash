@@ -44,3 +44,16 @@ CREATE INDEX IF NOT EXISTS idx_log_date ON generation_log(batch_date);
 -- lock (D1 is strongly consistent — KV is not).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_log_running_per_day
   ON generation_log(batch_date) WHERE status = 'running';
+
+-- Queued manual generation requests (POST /api/generate). waitUntil promises
+-- on an HTTP fetch event are killed ~30 s after the response on the real
+-- runtime — too short for the ~77 s pipeline — so a manual run is queued here
+-- and executed by the */15 cron poller (cron invocations get 15 minutes).
+CREATE TABLE IF NOT EXISTS run_requests (
+  id         TEXT    PRIMARY KEY,          -- uuid v4
+  batch_date TEXT    NOT NULL,             -- YYYY-MM-DD the run is for
+  requested  INTEGER NOT NULL,             -- card target, 1-50
+  created_at TEXT    NOT NULL              -- ISO datetime (FIFO order)
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_requests_date ON run_requests(batch_date);
