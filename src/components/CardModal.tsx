@@ -107,6 +107,7 @@ export function CardModal({ mode, card, onClose }: CardModalProps) {
         favorite: false,
         lastReviewedAt: null,
         reviewCount: 0,
+        origin: "user",
       };
       dispatch({ type: "ADD_CARD", card: newCard });
     } else if (card) {

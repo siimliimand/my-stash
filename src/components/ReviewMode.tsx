@@ -34,8 +34,8 @@ function pickReviewCards(cards: Card[]): Card[] {
 }
 
 export function ReviewMode({ onClose }: ReviewModeProps) {
-  const { data, dispatch } = useApp();
-  const [reviewCards] = useState<Card[]>(() => pickReviewCards(data.cards));
+  const { allCards, dispatch } = useApp();
+  const [reviewCards] = useState<Card[]>(() => pickReviewCards(allCards));
   const [index, setIndex] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const [done, setDone] = useState(false);

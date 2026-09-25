@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "updatedAt": "2026-09-25T00:00:00.000Z",
+  "totalCards": 0,
+  "recentTopicSlugs": [],
+  "categories": {
+    "Mindset": {
+      "Cognitive Biases": ["loss aversion", "confirmation bias", "dunning-kruger effect", "sunk cost fallacy"],
+      "Mental Models": ["inversion principle", "first principles thinking", "occam's razor", "second-order thinking"],
+      "Habits & Identity": ["habit loop", "identity-based habits", "compound effect", "temptation bundling"]
+    },
+    "Productivity": {
+      "Time Management": ["parkinson's law", "time blocking", "eisenhower matrix", "pomodoro technique"],
+      "Focus & Deep Work": ["deep work", "flow state", "attention residue", "single-tasking"],
+      "Systems": ["gtd methodology", "zettelkasten", "kanban boards"]
+    },
+    "Finance": {
+      "Investing": ["compounding returns", "index fund strategy", "dollar-cost averaging"],
+      "Behavioral Finance": ["market timing fallacy", "diversification", "risk-adjusted returns"],
+      "Personal Finance": ["pay yourself first", "emergency fund rule", "opportunity cost"]
+    },
+    "Tech": {
+      "Software Design": ["occam's razor in code", "separation of concerns", "yagni principle"],
+      "AI & Automation": ["prompt engineering basics", "automation bias"],
+      "Security": ["zero trust model", "principle of least privilege"]
+    },
+    "Creativity": {
+      "Idea Generation": ["lateral thinking", "constraints as catalysts", "bisociation"],
+      "Creative Process": ["incubation phase", "divergent vs convergent thinking"]
+    },
+    "Health & Wellbeing": {
+      "Sleep": [],
+      "Exercise": [],
+      "Nutrition": []
+    },
+    "Leadership & Communication": {
+      "Negotiation": [],
+      "Feedback": [],
+      "Storytelling": []
+    }
+  }
+}

@@ -38,6 +38,14 @@ npm run build
 
 The `public/_headers` file sets `Cache-Control: no-cache` on `sw.js` so the service worker is always refreshed.
 
+## AI Daily cards (optional backend)
+
+A companion Cloudflare Worker can deliver a daily batch of AI-generated cards (see [`docs/ai-backend-plan.md`](docs/ai-backend-plan.md)).
+
+- Set `NEXT_PUBLIC_API_URL` (e.g. `https://my-stash-api.workers.dev`) at **build** time — see `.env.example`.
+- If the variable is unset or the API is unreachable, the feature silently disables: no network calls, no AI pill, everything else unchanged.
+- AI cards are not persisted; only your interactions with them (favorites, reviews, edits, deletions) are kept locally under the `my-stash-ai-state` localStorage key.
+
 ## Node Version
 
 Node 22 (see `.node-version` if pinned).

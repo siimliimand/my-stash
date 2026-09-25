@@ -1,14 +1,24 @@
 "use client";
 
-import React, { createContext, useContext, useReducer, useEffect, useCallback, useRef } from "react";
+import React, { createContext, useContext, useReducer, useEffect, useCallback, useMemo, useRef } from "react";
 import { AppData, Card, Stash, SortMode, FilterMode } from "@/lib/types";
 import { readStorage, writeStorage, writeStorageImmediate } from "@/lib/storage";
 import { createSeedData } from "@/lib/seed";
+import { fetchTodayCards, isApiConfigured } from "@/lib/api";
+import {
+  AiCardOverrides,
+  EMPTY_AI_OVERRIDES,
+  applyAiOverrides,
+  readAiOverrides,
+  writeAiOverrides,
+} from "@/lib/aiState";
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
 type AppState = {
   data: AppData;
+  aiCards: Card[]; // raw API cards — in-memory only, never persisted
+  aiOverrides: AiCardOverrides; // user actions on AI cards, persisted separately
   filter: FilterMode;
   sortMode: SortMode;
   searchQuery: string;
@@ -37,7 +47,17 @@ type Action =
   | { type: "SET_SORT"; sort: SortMode }
   | { type: "SET_SEARCH"; query: string }
   | { type: "SET_INDEX"; index: number }
-  | { type: "SET_THEME"; theme: "light" | "dark" | "system" };
+  | { type: "SET_THEME"; theme: "light" | "dark" | "system" }
+  | { type: "SET_AI_CARDS"; cards: Card[] }
+  | { type: "SET_AI_OVERRIDES"; overrides: AiCardOverrides };
+
+// AI card = delivered by the API and not also a user card with that id
+function isAiCard(state: AppState, cardId: string): boolean {
+  return (
+    state.aiCards.some((c) => c.id === cardId) &&
+    !state.data.cards.some((c) => c.id === cardId)
+  );
+}
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -46,6 +66,12 @@ function reducer(state: AppState, action: Action): AppState {
 
     case "STORAGE_ERROR":
       return { ...state, isLoaded: true, storageError: true, corruptedRaw: action.raw };
+
+    case "SET_AI_CARDS":
+      return { ...state, aiCards: action.cards };
+
+    case "SET_AI_OVERRIDES":
+      return { ...state, aiOverrides: action.overrides };
 
     case "ADD_CARD": {
       const cards = [action.card, ...state.data.cards];
@@ -57,6 +83,18 @@ function reducer(state: AppState, action: Action): AppState {
     }
 
     case "UPDATE_CARD": {
+      if (isAiCard(state, action.card.id)) {
+        const edits = {
+          ...state.aiOverrides.edits,
+          [action.card.id]: {
+            title: action.card.title,
+            body: action.card.body,
+            source: action.card.source,
+            tags: action.card.tags,
+          },
+        };
+        return { ...state, aiOverrides: { ...state.aiOverrides, edits } };
+      }
       const cards = state.data.cards.map((c) =>
         c.id === action.card.id ? action.card : c
       );
@@ -64,6 +102,21 @@ function reducer(state: AppState, action: Action): AppState {
     }
 
     case "DELETE_CARD": {
+      if (isAiCard(state, action.cardId)) {
+        const deleted = state.aiOverrides.deleted.includes(action.cardId)
+          ? state.aiOverrides.deleted
+          : [...state.aiOverrides.deleted, action.cardId];
+        const stashes = state.data.stashes.map((s) => ({
+          ...s,
+          cardIds: s.cardIds.filter((id) => id !== action.cardId),
+        }));
+        return {
+          ...state,
+          aiOverrides: { ...state.aiOverrides, deleted },
+          data: { ...state.data, stashes },
+          currentIndex: 0,
+        };
+      }
       const cards = state.data.cards.filter((c) => c.id !== action.cardId);
       const stashes = state.data.stashes.map((s) => ({
         ...s,
@@ -73,6 +126,12 @@ function reducer(state: AppState, action: Action): AppState {
     }
 
     case "TOGGLE_FAVORITE": {
+      if (isAiCard(state, action.cardId)) {
+        const favorites = state.aiOverrides.favorites.includes(action.cardId)
+          ? state.aiOverrides.favorites.filter((id) => id !== action.cardId)
+          : [...state.aiOverrides.favorites, action.cardId];
+        return { ...state, aiOverrides: { ...state.aiOverrides, favorites } };
+      }
       const cards = state.data.cards.map((c) =>
         c.id === action.cardId ? { ...c, favorite: !c.favorite } : c
       );
@@ -80,6 +139,17 @@ function reducer(state: AppState, action: Action): AppState {
     }
 
     case "MARK_REVIEWED": {
+      if (isAiCard(state, action.cardId)) {
+        const prev = state.aiOverrides.reviews[action.cardId];
+        const reviews = {
+          ...state.aiOverrides.reviews,
+          [action.cardId]: {
+            lastReviewedAt: new Date().toISOString(),
+            reviewCount: (prev?.reviewCount ?? 0) + 1,
+          },
+        };
+        return { ...state, aiOverrides: { ...state.aiOverrides, reviews } };
+      }
       const cards = state.data.cards.map((c) =>
         c.id === action.cardId
           ? { ...c, lastReviewedAt: new Date().toISOString(), reviewCount: c.reviewCount + 1 }
@@ -155,6 +225,7 @@ function reducer(state: AppState, action: Action): AppState {
 
 type AppContextValue = AppState & {
   dispatch: React.Dispatch<Action>;
+  allCards: Card[];
   filteredCards: Card[];
 };
 
@@ -168,6 +239,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       stashes: [],
       settings: { theme: "system" },
     },
+    aiCards: [],
+    aiOverrides: EMPTY_AI_OVERRIDES,
     filter: { type: "all" },
     sortMode: "newest",
     searchQuery: "",
@@ -179,6 +252,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Load data from localStorage on mount
   useEffect(() => {
+    const overrides = readAiOverrides();
+    if (overrides !== EMPTY_AI_OVERRIDES) {
+      dispatch({ type: "SET_AI_OVERRIDES", overrides });
+    }
+
     const stored = readStorage();
     if (stored) {
       dispatch({ type: "INIT", data: stored });
@@ -201,6 +279,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         writeStorageImmediate(seed);
       }
     }
+
+    // Fetch today's AI cards in the background — never blocks first paint
+    if (isApiConfigured()) {
+      let cancelled = false;
+      fetchTodayCards().then((cards) => {
+        if (!cancelled && cards.length > 0) {
+          dispatch({ type: "SET_AI_CARDS", cards });
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
   }, []);
 
   // Persist to localStorage whenever data changes
@@ -211,6 +302,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     prevDataRef.current = state.data;
     writeStorage(state.data);
   }, [state.isLoaded, state.data]);
+
+  // Persist AI-card overrides to their own localStorage key
+  const prevAiOverridesRef = useRef(state.aiOverrides);
+  useEffect(() => {
+    if (!state.isLoaded) return;
+    if (state.aiOverrides === prevAiOverridesRef.current) return;
+    prevAiOverridesRef.current = state.aiOverrides;
+    writeAiOverrides(state.aiOverrides);
+  }, [state.isLoaded, state.aiOverrides]);
 
   // Apply theme
   useEffect(() => {
@@ -229,9 +329,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [state.isLoaded, state.data.settings.theme]);
 
+  // Merged view: user cards + AI cards with user overrides applied (AI cards not persisted)
+  const allCards = useMemo(
+    () => [...state.data.cards, ...applyAiOverrides(state.aiCards, state.aiOverrides)],
+    [state.data.cards, state.aiCards, state.aiOverrides]
+  );
+
   // Compute filtered + sorted card list
   const filteredCards = useCallback(() => {
-    let cards = [...state.data.cards];
+    let cards = [...allCards];
 
     // Filter by active filter mode
     const filter = state.filter;
@@ -243,6 +349,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const idSet = new Set(stash.cardIds);
         cards = cards.filter((c) => idSet.has(c.id));
       }
+    } else if (filter.type === "ai-today") {
+      cards = cards.filter((c) => c.origin === "ai");
     }
 
     // Filter by search
@@ -266,13 +374,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
 
     return cards;
-  }, [state.data.cards, state.data.stashes, state.filter, state.searchQuery, state.sortMode]);
+  }, [allCards, state.data.stashes, state.filter, state.searchQuery, state.sortMode]);
 
   return (
     <AppContext.Provider
       value={{
         ...state,
         dispatch,
+        allCards,
         filteredCards: filteredCards(),
       }}
     >

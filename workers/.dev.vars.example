@@ -1,0 +1,6 @@
+# Copy to .dev.vars (git-ignored) and fill in for `wrangler dev`.
+# .dev.vars is loaded automatically for local development only.
+OPENROUTER_API_KEY=
+ADMIN_SECRET=
+# Local dev CORS: uncomment to allow your frontend origin (comma-separated list).
+# CORS_ORIGIN=http://localhost:3000

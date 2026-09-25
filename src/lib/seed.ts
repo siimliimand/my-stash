@@ -9,7 +9,7 @@ function uuid(): string {
   return crypto.randomUUID();
 }
 
-const SEED_CARDS: Omit<Card, "id" | "createdAt" | "updatedAt">[] = [
+const SEED_CARDS: Omit<Card, "id" | "createdAt" | "updatedAt" | "origin">[] = [
   {
     title: "Parkinson's Law",
     body: "**Work expands to fill the time available for its completion.** If you give yourself a week to complete a two-hour task, the task will grow in complexity to fill that week.\n\nThe fix is simple: set *shorter, tighter deadlines*. Artificial constraints force focus and cut unnecessary complexity.\n\n- Estimate tasks honestly, then halve your estimate\n- Time-box work sessions to create urgency\n- Deadlines are a feature, not a bug",
@@ -93,6 +93,7 @@ export function createSeedData(): AppData {
       id: uuid(),
       createdAt: iso(createdAt),
       updatedAt: iso(createdAt),
+      origin: "user",
     };
   });
 

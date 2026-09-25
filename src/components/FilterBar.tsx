@@ -17,13 +17,20 @@ import { MoreHorizontal } from "lucide-react";
 const DEFAULT_TAGS = ["Mindset", "Productivity", "Tech", "Finance", "Creativity"];
 
 export function FilterBar() {
-  const { data, filter, dispatch } = useApp();
+  const { allCards, data, filter, dispatch } = useApp();
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Collect all tags from cards (includes custom ones beyond defaults)
   const allTags = Array.from(
-    new Set([...DEFAULT_TAGS, ...data.cards.flatMap((c) => c.tags)])
+    new Set([...DEFAULT_TAGS, ...allCards.flatMap((c) => c.tags)])
   ).sort();
+
+  const aiCount = allCards.filter((c) => c.origin === "ai").length;
+
+  // Stash pills count only cards we can actually display: a stash may still
+  // reference ids that are not in allCards (e.g. the API was unreachable and
+  // AI cards are missing this session).
+  const knownCardIds = new Set(allCards.map((c) => c.id));
 
   function setFilter(f: FilterMode) {
     dispatch({ type: "SET_FILTER", filter: f });
@@ -31,7 +38,7 @@ export function FilterBar() {
 
   function isActive(f: FilterMode): boolean {
     if (f.type !== filter.type) return false;
-    if (f.type === "all") return true;
+    if (f.type === "all" || f.type === "ai-today") return true;
     if (f.type === "tag" && filter.type === "tag") return f.tag === filter.tag;
     if (f.type === "stash" && filter.type === "stash") return f.stashId === filter.stashId;
     return false;
@@ -63,14 +70,24 @@ export function FilterBar() {
         {/* All pill */}
         <Pill
           label="All"
-          count={data.cards.length}
+          count={allCards.length}
           active={isActive({ type: "all" })}
           onClick={() => setFilter({ type: "all" })}
         />
 
+        {/* AI Daily pill — only when the backend delivered cards */}
+        {aiCount > 0 && (
+          <Pill
+            label="✨ AI Daily"
+            count={aiCount}
+            active={isActive({ type: "ai-today" })}
+            onClick={() => setFilter({ type: "ai-today" })}
+          />
+        )}
+
         {/* Tag pills */}
         {allTags.map((tag) => {
-          const count = data.cards.filter((c) => c.tags.includes(tag)).length;
+          const count = allCards.filter((c) => c.tags.includes(tag)).length;
           if (count === 0) return null;
           return (
             <Pill
@@ -92,7 +109,7 @@ export function FilterBar() {
             key={stash.id}
             id={stash.id}
             name={stash.name}
-            count={stash.cardIds.length}
+            count={stash.cardIds.filter((id) => knownCardIds.has(id)).length}
             active={isActive({ type: "stash", stashId: stash.id })}
             onClick={() => setFilter({ type: "stash", stashId: stash.id })}
             onRename={() => handleRenameStash(stash.id, stash.name)}

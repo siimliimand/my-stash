@@ -1,0 +1,37 @@
+// Wrangler configuration for the My Stash API Worker.
+// Before deploying, replace the three REPLACE_WITH_* placeholders:
+//   1. account_id      -> `npx wrangler whoami`
+//   2. database_id     -> `npx wrangler d1 create my-stash-cards`
+//   3. kv namespace id -> `npx wrangler kv namespace create KV`
+// Secrets (never put these in this file):
+//   npx wrangler secret put OPENROUTER_API_KEY
+//   npx wrangler secret put ADMIN_SECRET
+{
+  "name": "my-stash-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "account_id": "29f50b2c797dc5cd6ccd0cff405adb43",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "my-stash-cards",
+      "database_id": "bae964bb-0d13-4aca-9b2f-4f88a3b7aa69"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "5b67cd2c595f4d31b3b1be5db76e9bef"
+    }
+  ],
+  "triggers": {
+    "crons": ["0 5 * * *"]
+  },
+  "vars": {
+    // "~" prefix is OpenRouter's family alias — resolves to the latest Luna model.
+    // (The plan's bare "openai/gpt-luna-latest" is NOT a valid id; verified 404.)
+    "OPENROUTER_MODEL": "~openai/gpt-luna-latest",
+    "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+    "CORS_ORIGIN": "https://my-stash.pages.dev"
+  }
+}

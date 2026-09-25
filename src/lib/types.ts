@@ -9,6 +9,10 @@ export type Card = {
   favorite: boolean;
   lastReviewedAt: string | null;
   reviewCount: number;
+  origin: "user" | "ai";
+  category?: string;
+  subcategory?: string;
+  batchDate?: string;
 };
 
 export type Stash = {
@@ -28,4 +32,8 @@ export type AppData = {
 };
 
 export type SortMode = "newest" | "favorites" | "most-reviewed";
-export type FilterMode = { type: "tag"; tag: string } | { type: "stash"; stashId: string } | { type: "all" };
+export type FilterMode =
+  | { type: "tag"; tag: string }
+  | { type: "stash"; stashId: string }
+  | { type: "ai-today" }
+  | { type: "all" };

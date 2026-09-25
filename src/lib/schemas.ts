@@ -11,6 +11,10 @@ export const CardSchema = z.object({
   favorite: z.boolean().default(false),
   lastReviewedAt: z.string().datetime().nullable().default(null),
   reviewCount: z.number().int().nonnegative().default(0),
+  origin: z.enum(["user", "ai"]).default("user"),
+  category: z.string().optional(),
+  subcategory: z.string().optional(),
+  batchDate: z.string().optional(),
 });
 
 export const StashSchema = z.object({

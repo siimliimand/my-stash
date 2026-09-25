@@ -1,0 +1,285 @@
+# My Stash API — Cloudflare Worker backend
+
+REST API + daily AI generation pipeline for "My Stash": 50 new microlearning
+cards per day, generated via OpenRouter, stored in D1, deduplicated with a KV
+topic-coverage map, exposed to the static Next.js frontend on Cloudflare Pages.
+
+Implementation follows `docs/ai-backend-plan.md` (prompts §12 and schema §4 are
+verbatim from the plan). Deviations from the plan are listed at the bottom.
+
+```
+workers/
+├── src/
+│   ├── index.ts              # Worker entry — routes + cron handler
+│   ├── routes/
+│   │   ├── cards.ts          # GET /api/cards, GET /api/cards/today
+│   │   ├── stats.ts          # GET /api/stats
+│   │   └── admin.ts          # POST /api/generate (secret-gated)
+│   ├── generation/
+│   │   ├── pipeline.ts       # runGeneration() — plan §6 steps 1–10
+│   │   ├── topic-map.ts      # coverage map load/validate/merge (+ local fallback)
+│   │   ├── ai-client.ts      # OpenRouter wrapper: retries, JSON mode, validation
+│   │   ├── prompts.ts        # the four prompt templates (plan §12, verbatim)
+│   │   └── dedup.ts          # normalizeTitle, sha256Prefix, AI-output validators
+│   └── lib/
+│       ├── db.ts             # D1 helpers (chunked IN, batched inserts, log)
+│       ├── kv.ts             # typed KV helpers, cache get/put/delete-by-prefix
+│       ├── types.ts          # Env, TopicCoverageMap, ApiCard, PipelineResult, ...
+│       └── cors.ts           # CORS headers + JSON response helpers
+├── wrangler.jsonc            # bindings, cron, vars
+├── schema.sql                # D1 schema (plan §4)
+├── seed/seed-map.json        # initial topic-coverage-map (plan §2.1, v1, empty)
+├── test/                     # vitest unit tests (pure logic)
+└── .dev.vars.example         # local-dev secrets template
+```
+
+## Development
+
+```bash
+cd workers
+npm install
+npx wrangler types        # regenerate worker-configuration.d.ts after config changes
+npx tsc --noEmit          # type gate (deploy --dry-run does NOT type-check)
+npx vitest run            # unit tests
+npx wrangler deploy --dry-run --outdir=dist   # bundle check
+```
+
+Local end-to-end run (uses `.dev.vars`, local D1/KV simulators):
+
+```bash
+cp .dev.vars.example .dev.vars      # then fill in OPENROUTER_API_KEY / ADMIN_SECRET
+npx wrangler d1 execute my-stash-cards --local --file=./schema.sql
+npx wrangler kv key put topic-coverage-map --path=seed/seed-map.json --local
+npx wrangler dev
+```
+
+When changing `wrangler.jsonc`, rerun `npx wrangler types` (CI habit:
+`wrangler types --check` fails on stale generated types).
+
+Local CORS: with `CORS_ORIGIN` unset the API answers `Access-Control-Allow-Origin: *`,
+which covers most local browser use. To restrict it, uncomment the
+`CORS_ORIGIN` line in `.dev.vars` and set your frontend origin (e.g.
+`http://localhost:3000`); comma-separate multiple origins.
+
+## Deployment runbook
+
+Run from `workers/`. Replace the three placeholders in `wrangler.jsonc` first:
+`account_id` (`npx wrangler whoami`), `database_id` (step 1), KV `id` (step 2).
+
+1. Create the D1 database:
+
+   ```bash
+   npx wrangler d1 create my-stash-cards
+   # copy database_id into wrangler.jsonc
+   ```
+
+2. Create the KV namespace (binding name is `KV`):
+
+   ```bash
+   npx wrangler kv namespace create KV
+   # copy the namespace id into wrangler.jsonc
+   ```
+
+3. Apply the D1 schema (remote). Fresh applies only — `schema.sql` includes
+   the `idx_log_running_per_day` partial unique index (the concurrent-run
+   lock, see deviations); the project is not yet deployed, so there is no
+   existing database to migrate:
+
+   ```bash
+   npx wrangler d1 execute my-stash-cards --remote --file=./schema.sql
+   ```
+
+4. Set the secrets:
+
+   ```bash
+   npx wrangler secret put OPENROUTER_API_KEY
+   npx wrangler secret put ADMIN_SECRET
+   ```
+
+5. Seed the topic coverage map in KV:
+
+   ```bash
+   npx wrangler kv key put topic-coverage-map --path=seed/seed-map.json --namespace-id=<KV_NAMESPACE_ID>
+   ```
+
+6. Deploy the Worker:
+
+   ```bash
+   npx wrangler deploy
+   ```
+
+7. Trigger the first batch manually:
+
+   ```bash
+   curl -X POST https://my-stash-api.workers.dev/api/generate \
+     -H "Authorization: Bearer $ADMIN_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"requested": 50}'
+   # -> 202 {"status":"started","batchDate":"2026-09-25"}
+   # poll:
+   curl https://my-stash-api.workers.dev/api/stats
+   ```
+
+8. Point the frontend at the Worker: set
+   `NEXT_PUBLIC_API_URL=https://my-stash-api.workers.dev` in the Pages
+   environment and redeploy Pages.
+
+9. Verify the cron (`0 5 * * *`, 05:00 UTC) next day via the Workers
+   dashboard -> Triggers, or by checking `wrangler tail` output and
+   `GET /api/stats` (`totalBatches` should increment).
+
+## API
+
+| Route | Auth | Cache |
+|---|---|---|
+| `GET /api/cards?page&limit&category&tag&date` | public | KV 1h per param combo (`api-cache:cards:<hash>`), `Cache-Control: public, max-age=3600` |
+| `GET /api/cards/today` | public | KV 6h (`api-cache:today`, invalidated by the pipeline), `Cache-Control: public, max-age=300, stale-while-revalidate=21000` |
+| `GET /api/stats` | public | none server-side, `max-age=300` |
+| `POST /api/generate` | `Authorization: Bearer $ADMIN_SECRET` | `no-store` |
+
+Notes:
+
+- `/api/cards`: `page >= 1`, `limit` default 20 clamped to 1–50, `date` must be
+  `YYYY-MM-DD` (otherwise ignored). Tag filtering uses
+  `EXISTS (SELECT 1 FROM json_each(generated_cards.tags) ...)`.
+- `/api/cards/today`: if today's batch has no cards yet (before the first cron
+  fires), it degrades gracefully and returns the most recent batch that has
+  cards, with `batchDate` telling the client which batch it got.
+- `POST /api/generate` body is optional; `{ "requested": n }` clamps 1–50.
+  If today already produced cards (`success`, or `partial` with
+  `generated > 0` in `generation_log`), it returns
+  `200 {"status":"already_completed", ...}`; a day with zero cards
+  (`failed`, or a 0-card `partial`) can be retried. Otherwise
+  `202 {"status":"started", ...}` and the pipeline runs via `ctx.waitUntil`.
+  If another run (cron or admin) is already in flight, the pipeline skips
+  itself with `status: "skipped", reason: "lock-held"` — a partial UNIQUE
+  index on `generation_log(batch_date) WHERE status = 'running'` enforces one
+  run per day, and locks whose isolate died are swept after 30 minutes.
+- When `OPENROUTER_API_KEY` is unset, the read endpoints keep working; only
+  generation returns `503 {"error":"generation not configured"}` (see
+  deviations).
+- 404s return `{"error":"not_found"}`; known paths with wrong methods return
+  405. All responses carry CORS headers from `CORS_ORIGIN`
+  (`Access-Control-Allow-Headers: Authorization, Content-Type`).
+  `CORS_ORIGIN` may be a comma-separated allowlist: an `Origin` matching an
+  entry is echoed back (with `Vary: Origin`), a non-allowlisted browser
+  origin gets no `Access-Control-Allow-Origin` at all, and requests without
+  an `Origin` header (curl/cron) get the first entry. When the var is
+  unset/empty it falls back to `*`.
+
+## Model id caveat
+
+The plan mandates `openai/gpt-luna-latest`, which could not be verified on
+OpenRouter (404 on the model page; sibling `openai/gpt-5.6-luna` IS verified).
+It is kept as the default value of the `OPENROUTER_MODEL` var exactly as the
+plan says. Everything reads the var, so if the first run 404s, switch with one
+line in `wrangler.jsonc`:
+
+```jsonc
+"OPENROUTER_MODEL": "openai/gpt-5.6-luna"
+```
+
+then `npx wrangler deploy`.
+
+### Reasoning tokens count against `max_completion_tokens`
+
+The model above is a **reasoning model**: before (and while) writing its
+answer it spends hidden reasoning tokens, and OpenRouter caps AND bills those
+as part of `max_completion_tokens`. Production observed
+`finish_reason: "length"` with `usage: {completion_tokens: 4000,
+reasoning_tokens: 1404}` — leaving only ~2,600 tokens of actual JSON and
+cutting the response mid-object. The per-call caps in `ai-client.ts` are
+therefore sized as visible output + reasoning headroom (~1,400 tokens typical,
+can spike):
+
+| Call site (`pipeline.ts`)    | Visible-output estimate                       | Cap     |
+|------------------------------|-----------------------------------------------|---------|
+| Title generation (60 titles) | 60 title objects x ~70 tokens ≈ 4,200         | 10,000  |
+| Near-duplicate filter        | echoes ~50 short candidates + small verdict   |  4,000  |
+| Card expansion (10 cards)    | 10 cards x 80–150 words ≈ 2,500–3,500 tokens  |  8,000  |
+| Map update                   | echoes the full coverage map + merged output  |  8,000  |
+
+`callAIJson` is additionally self-correcting: if a response fails to
+parse/validate and `finish_reason` was `"length"`, it retries once at double
+the cap (same messages, hard ceiling 32,000) before the existing
+stricter-prompt retry; if every attempt still fails, the thrown error mentions
+`finish_reason=length` so the generation log stays diagnosable.
+
+## Deviations from the plan (and why)
+
+1. **`wrangler.jsonc` instead of `wrangler.toml`** — Cloudflare's
+   recommendation for new projects; TOML still works.
+2. **KV binding named `KV`** (plan §14 draft used `MY_STASH_KV`) — matches the
+   brief and `wrangler kv namespace create KV`.
+3. **`max_completion_tokens` instead of `max_tokens`** — the latter is
+   deprecated upstream.
+4. **HTTP-200-with-error-body handling** — OpenRouter can return
+   `200 { "error": { code, message } }` on provider failure; `ai-client.ts`
+   checks the body error object on every response, not just the status code,
+   and retries it when the code is retryable.
+5. **`recentTopicSlugs` extension field on the topic map** (cap 50, refreshed
+   to the last inserted slugs each batch) — gives the near-dedup prompt a
+   deterministic "recently covered" list instead of relying on JSON key order.
+   The seed file and `DEFAULT_TOPIC_MAP` include it; older maps without it
+   still load (validator defaults it to `[]`).
+6. **Deterministic local map-merge fallback** — if the AI map merge fails or
+   returns an invalid map (old entries dropped, version not bumped, new slugs
+   missing), a pure local merge does exactly what `MAP_UPDATE_PROMPT` asks.
+   Cards are already committed at that point; the map update must not fail the
+   batch. Deterministic fields (`totalCards`, `recentTopicSlugs`, `updatedAt`)
+   are always recomputed locally, even on the AI path.
+7. **"Retry in 1 hour via `setTimeout`" (plan §13) replaced by immediate
+   in-pipeline retry + `partial` status** — Workers have no timers beyond the
+   invocation, so there is no hourly timer. The AI client retries transient
+   failures inside the run (3x backoff), unparseable JSON once with a
+   stricter prompt, and a truncated response (`finish_reason=length`) once at
+   a doubled cap — see "Reasoning tokens" above. A day that produced ZERO
+   cards (`failed`, or a 0-card
+   `partial`) is retryable the same day — the guard only blocks days that
+   actually have cards.
+8. **Read endpoints stay up when `OPENROUTER_API_KEY` is missing** — plan §13
+   says 503 on all routes; per PM decision only generation routes return 503,
+   so `/api/cards`, `/api/cards/today` and `/api/stats` keep serving the
+   already-generated corpus.
+9. **Guard treats a day WITH cards as done** — `success` rows and `partial`
+   rows with `generated > 0` block a re-run (no double-generate); a `failed`
+   row and a 0-card `partial` row allow retry, so a day that generated nothing
+   is never permanently un-retryable. D1 (strongly consistent) is the
+   authoritative guard; KV is only a cache (eventual consistency, ~60s).
+10. **`INSERT OR IGNORE` written as `ON CONFLICT(title_hash) DO NOTHING`** —
+    same SQLite semantics, explicit conflict target. Inserts go through
+    transactional `db.batch()` chunks of 50 (counted from `meta.changes`);
+    D1 IN-lookups are chunked at 90 params (hard limit 100).
+11. **`/api/cards/today` falls back to the latest batch with cards** when
+    today has none yet — nicer first-day behavior than an empty 200.
+12. **Placeholders must be replaced before deploy**: `account_id`,
+    `database_id`, and the KV namespace `id` in `wrangler.jsonc` are
+    `REPLACE_WITH_*` sentinels; the runbook above fills them in.
+13. **Strongly-consistent D1 run lock** — a partial UNIQUE index,
+    `idx_log_running_per_day` on `generation_log(batch_date) WHERE status =
+    'running'`, makes a concurrent cron + admin double-run impossible: each
+    run inserts its `running` row (INSERT OR IGNORE) at start and UPDATEs that
+    same row to its final status at completion, so a run never leaves two rows
+    behind and a crashed run ends `failed` (retryable), never stranded as
+    `running` — except when the isolate itself dies, which the 30-minute
+    stale-lock sweep covers. `changes = 0` on the insert means another run
+    holds the lock and the run is skipped (`reason: 'lock-held'`). KV is
+    eventually consistent and deliberately not used for this. Schema addition
+    applies to fresh databases only; the project is not yet deployed, so no
+    migration is needed.
+14. **`/api/cards/today` browser cache shortened** — plan §7 says "cached in
+    KV for 6 hours"; the KV TTL stays 21600 s (the pipeline invalidates that
+    key after each batch), but the BROWSER `Cache-Control` is now
+    `public, max-age=300, stale-while-revalidate=21000` — a 6 h browser cache
+    kept serving stale cards all day after a batch landed, because the browser
+    never revalidated.
+15. **`CORS_ORIGIN` accepts a comma-separated allowlist** — an `Origin`
+    matching an entry is echoed back with `Vary: Origin`; a non-allowlisted
+    browser origin gets no `Access-Control-Allow-Origin` header (the browser
+    blocks it); requests without an `Origin` header get the first entry; a
+    single configured origin behaves exactly as before, and an unset var still
+    falls back to `*`.
+16. **AI map merges are capped** — an AI-merged map holding more than
+    `existingTotal + newTopics.length + 10` slugs (counted across all
+    categories/subcategories) is rejected in favor of the deterministic local
+    merge, guarding against runaway invented slugs.
