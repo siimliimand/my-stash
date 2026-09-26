@@ -27,6 +27,7 @@
 import { handleCards, handleToday } from './routes/cards';
 import { handleStats } from './routes/stats';
 import { handleGenerate, handleRunSync } from './routes/admin';
+import { DEFAULT_DAILY_REQUESTED } from './generation/categories';
 import { jsonResponse, optionsResponse, withCors } from './lib/cors';
 import { consumeRunRequest } from './lib/db';
 import { runGeneration } from './generation/pipeline';
@@ -89,7 +90,9 @@ export default {
 
       // */15 poller with nothing queued: no-op, no AI calls.
       if (!isDailyCron && manual === null) return;
-      const requested = manual?.requested ?? 50;
+      // Daily default: 2 cards per canonical category (16) — README
+      // "Deviations" #20; a queued manual run keeps its own override.
+      const requested = manual?.requested ?? DEFAULT_DAILY_REQUESTED;
 
       ctx.waitUntil(
         runGeneration(env, ctx, { requested })

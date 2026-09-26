@@ -1,8 +1,9 @@
 # My Stash API — Cloudflare Worker backend
 
-REST API + daily AI generation pipeline for "My Stash": 50 new microlearning
-cards per day, generated via OpenRouter, stored in D1, deduplicated with a KV
-topic-coverage map, exposed to the static Next.js frontend on Cloudflare Pages.
+REST API + daily AI generation pipeline for "My Stash": 16 new microlearning
+cards per day (2 per canonical category — 8 categories), generated via
+OpenRouter, stored in D1, deduplicated with a KV topic-coverage map, exposed to
+the static Next.js frontend on Cloudflare Pages.
 
 Implementation follows `docs/ai-backend-plan.md` (prompts §12 and schema §4 are
 verbatim from the plan). Deviations from the plan are listed at the bottom.
@@ -19,7 +20,8 @@ workers/
 │   │   ├── pipeline.ts       # runGeneration() — plan §6 steps 1–10
 │   │   ├── topic-map.ts      # coverage map load/validate/merge (+ local fallback)
 │   │   ├── ai-client.ts      # OpenRouter wrapper: retries, JSON mode, validation
-│   │   ├── prompts.ts        # the four prompt templates (plan §12, verbatim)
+│   │   ├── prompts.ts        # the four prompt templates (plan §12, verbatim
+│   │   │                     #   except the title prompt's quota — deviation #20)
 │   │   ├── dedup.ts          # normalizeTitle, sha256Prefix, AI-output validators
 │   │   └── categories.ts     # the 8 canonical categories + alias enforcement
 │   └── lib/
@@ -113,9 +115,7 @@ Run from `workers/`. Replace the three placeholders in `wrangler.jsonc` first:
 
    ```bash
    curl -X POST https://my-stash-api.workers.dev/api/generate \
-     -H "Authorization: Bearer $ADMIN_SECRET" \
-     -H "Content-Type: application/json" \
-     -d '{"requested": 50}'
+     -H "Authorization: Bearer $ADMIN_SECRET"
    # -> 202 {"status":"queued","batchDate":"2026-09-25"}
    # the */15 cron poller picks the run up within <= 15 minutes; poll:
    curl https://my-stash-api.workers.dev/api/stats
@@ -126,11 +126,12 @@ Run from `workers/`. Replace the three placeholders in `wrangler.jsonc` first:
 
    ```bash
    curl -X POST https://my-stash-api.workers.dev/api/run-sync \
-     -H "Authorization: Bearer $ADMIN_SECRET" \
-     -H "Content-Type: application/json" \
-     -d '{"requested": 50}'
+     -H "Authorization: Bearer $ADMIN_SECRET"
    # -> 200 {"status":"completed","batchDate":"2026-09-25",...} after ~90 s
    ```
+
+   An empty body uses the daily default (2 cards per category, 16 total);
+   `{ "requested": n }` overrides it (clamped 1–50).
 
 8. Point the frontend at the Worker: set
    `NEXT_PUBLIC_API_URL=https://my-stash-api.workers.dev` in the Pages
@@ -158,7 +159,8 @@ Notes:
 - `/api/cards/today`: if today's batch has no cards yet (before the first cron
   fires), it degrades gracefully and returns the most recent batch that has
   cards, with `batchDate` telling the client which batch it got.
-- `POST /api/generate` body is optional; `{ "requested": n }` clamps 1–50.
+- `POST /api/generate` body is optional; `{ "requested": n }` clamps 1–50 and
+  defaults to the daily target of 2 cards per canonical category (16 total).
   If today already produced cards (`success`, or `partial` with
   `generated > 0` in `generation_log`), it returns
   `200 {"status":"already_completed", ...}` and nothing is queued; a day with
@@ -227,12 +229,13 @@ cutting the response mid-object. The per-call caps in `ai-client.ts` are
 therefore sized as visible output + reasoning headroom (~1,400 tokens typical,
 can spike):
 
-| Call site (`pipeline.ts`)    | Visible-output estimate                       | Cap     |
-|------------------------------|-----------------------------------------------|---------|
-| Title generation (60 titles) | 60 title objects x ~70 tokens ≈ 4,200         | 10,000  |
-| Near-duplicate filter        | echoes ~50 short candidates + small verdict   |  4,000  |
-| Card expansion (10 cards)    | 10 cards x 80–150 words ≈ 2,500–3,500 tokens  |  8,000  |
-| Map update                   | echoes the full coverage map + merged output  |  8,000  |
+| Call site (`pipeline.ts`)            | Visible-output estimate                       | Cap     |
+|--------------------------------------|-----------------------------------------------|---------|
+| Title generation (24 titles)         | 24 title objects x ~70 tokens ≈ 1,700         | 10,000  |
+|                                      | (quota + 1 per category; ~4,500 at manual 50) |         |
+| Near-duplicate filter                | echoes ~24 short candidates + small verdict   |  4,000  |
+| Card expansion (10 cards)            | 10 cards x 80–150 words ≈ 2,500–3,500 tokens  |  8,000  |
+| Map update                           | echoes the full coverage map + merged output  |  8,000  |
 
 `callAIJson` is additionally self-correcting: if a response fails to
 parse/validate and `finish_reason` was `"length"`, it retries once at double
@@ -361,11 +364,31 @@ stricter-prompt retry; if every attempt still fails, the thrown error mentions
 
     ```bash
     curl -X POST https://my-stash-api.workers.dev/api/run-sync \
-      -H "Authorization: Bearer $ADMIN_SECRET" \
-      -H "Content-Type: application/json" \
-      -d '{"requested": 50}'
+      -H "Authorization: Bearer $ADMIN_SECRET"
     # -> 200 {"status":"completed","batchDate":"<today>",...} after ~90 s
     ```
+20. **Daily batch retargeted from 50 free-distributed cards to 2 per canonical
+    category per day (16/day)** — 2026-09-26 product-owner spec change. The
+    plan asked the title AI for 60 candidates and took the first 50 whatever
+    categories they happened to land in; the owner now wants an even spread:
+    `CARDS_PER_CATEGORY_PER_DAY = 2` per each of the 8 canonical categories,
+    so `DEFAULT_DAILY_REQUESTED` = 16 is the daily default (admin endpoints
+    and the cron fallback both read it), while the manual
+    `{ "requested": n }` override keeps its 1–50 clamp. Three mechanisms
+    deliver the spread: (a) `TITLE_GENERATION_PROMPT` states an explicit
+    per-category quota — `ceil(requested / 8) + 1` candidates per category
+    (3 per category / 24 titles total for the default 16) — replacing the
+    fixed 60-title ask and keeping a per-category surplus like the old
+    60-for-50 one; (b) selection replaces the global `slice(0, requested)`
+    with a per-category round-robin (`selectAcrossCategories`): a first pass
+    takes up to the quota per category in canonical order, then top-up rounds
+    draw from each category's remaining surplus so a category whose candidates
+    were all dropped or deduplicated lets the others fill the gap — round-robin
+    also handles a `requested` that is not divisible by 8; (c) a category that
+    contributed nothing is surfaced as a run warning ("no titles selected for
+    N of the 8 categories (…names…)"). Title quality ordering is unchanged
+    (model order, take-earliest per category), and the 'success' threshold
+    (`generated >= requested * 0.8`) now evaluates against 16.
 19. **Canonical categories are hard-enforced at title-candidate validation** —
     the plan never constrains the `category` string the title AI stamps on
     each candidate, and the 2026-09-26 production run showed what that costs:
@@ -379,8 +402,9 @@ stricter-prompt retry; if every attempt still fails, the thrown error mentions
     plan's own "Health" / "Leadership" / "Communication" shorthands from the
     §12 tag lists and the §7 example output) with the canonical spelling
     written back, and anything still non-canonical is DROPPED before the
-    dedup steps and the 60→50 selection cut — the 60-title surplus absorbs
-    the loss, and no expansion AI calls are spent on doomed candidates. Each
+    dedup steps and the selection cut — the title prompt's surplus quota
+    absorbs the loss (#20 later made that surplus per-category), and no
+    expansion AI calls are spent on doomed candidates. Each
     drop is surfaced as a run warning ("dropped N title(s) with
     non-canonical categories (…names…)"). The free-text `subcategory` field
     is deliberately untouched — only categories are enumerated.

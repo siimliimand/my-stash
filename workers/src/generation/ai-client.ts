@@ -21,8 +21,9 @@ const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504, 529]);
  *
  * | Call site            | Visible-output estimate                      | Cap    |
  * |----------------------|----------------------------------------------|--------|
- * | Title generation     | 60 title objects x ~70 tokens ≈ 4,200        | 10,000 |
- * | Near-dedup filter    | echoes ~50 short candidates + small verdict  |  4,000 |
+ * | Title generation     | 24 title objects x ~70 tokens ≈ 1,700        | 10,000 |
+ * |                      | (quota + 1 per category; ~4,500 at manual 50)|        |
+ * | Near-dedup filter    | echoes ~24 short candidates + small verdict  |  4,000 |
  * | Card expansion       | 10 cards x 80–150 words ≈ 2,500–3,500 tokens |  8,000 |
  * | Map update           | echoes the full coverage map + merged output |  8,000 |
  */

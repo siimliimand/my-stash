@@ -26,7 +26,7 @@ import worker from '../src/index';
 import { handleCards, handleToday } from '../src/routes/cards';
 import { handleGenerate, handleRunSync } from '../src/routes/admin';
 import { runGeneration } from '../src/generation/pipeline';
-import { CANONICAL_CATEGORIES } from '../src/generation/categories';
+import { CANONICAL_CATEGORIES, DEFAULT_DAILY_REQUESTED } from '../src/generation/categories';
 import { normalizeTitle, sha256Prefix } from '../src/generation/dedup';
 import { mergeTopicsDeterministic } from '../src/generation/topic-map';
 import { consumeRunRequest, queueRunRequest } from '../src/lib/db';
@@ -442,7 +442,7 @@ afterEach(() => {
 });
 
 describe('pipeline happy path (cron)', () => {
-  test('inserts 50 cards, logs success, updates the map, is idempotent, serves /today', async () => {
+  test('inserts the 16 default cards (2 per category), logs success, updates the map, is idempotent, serves /today', async () => {
     // Stale cache entries present before the run — must be invalidated.
     h.kv.seed('api-cache:today', JSON.stringify({ cards: [{ id: 'stale' }], batchDate: '2020-01-01' }));
     h.kv.seed('api-cache:cards:stale-key', JSON.stringify({ cards: [], pagination: { page: 1, limit: 20, total: 0, pages: 1 } }));
@@ -451,13 +451,13 @@ describe('pipeline happy path (cron)', () => {
     await runCron(h);
 
     // ---- D1 state
-    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generated_cards')).toBe(16);
     const rows = h.db.rows<CardRow>('SELECT id, title, title_hash, batch_date, category, topic_slug FROM generated_cards');
     expect(rows.every((r) => r.batch_date === today)).toBe(true);
     const distinctCategories = new Set(rows.map((r) => r.category));
-    expect(distinctCategories.size).toBeGreaterThanOrEqual(6);
+    expect(distinctCategories.size).toBe(CANONICAL_CATEGORIES.length);
     const distinctHashes = new Set(rows.map((r) => r.title_hash));
-    expect(distinctHashes.size).toBe(50);
+    expect(distinctHashes.size).toBe(16);
     for (const r of rows) expect(r.title_hash).toHaveLength(16);
 
     // ---- generation_log
@@ -470,13 +470,13 @@ describe('pipeline happy path (cron)', () => {
       error: null;
     }>('SELECT status, requested, generated, duplicates_skip, model, error FROM generation_log');
     expect(log).toHaveLength(1);
-    expect(log[0]).toMatchObject({ status: 'success', requested: 50, generated: 50, duplicates_skip: 0, model: 'test-model', error: null });
+    expect(log[0]).toMatchObject({ status: 'success', requested: 16, generated: 16, duplicates_skip: 0, model: 'test-model', error: null });
 
     // ---- topic map updated (version+1, slugs merged, recentTopicSlugs)
     const map = (await h.kv.get('topic-coverage-map', 'json')) as unknown as TopicCoverageMap;
     expect(map.version).toBe(2);
-    expect(map.totalCards).toBe(50);
-    expect(map.recentTopicSlugs).toHaveLength(50);
+    expect(map.totalCards).toBe(16);
+    expect(map.recentTopicSlugs).toHaveLength(16);
     const mergedSlugs = new Set(Object.values(map.categories).flatMap((subs) => Object.values(subs).flat()));
     for (const slug of rows.map((r) => r.topic_slug)) expect(mergedSlugs.has(slug)).toBe(true);
 
@@ -486,7 +486,7 @@ describe('pipeline happy path (cron)', () => {
 
     // ---- second run the same day: skipped, nothing changed
     await runCron(h);
-    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generated_cards')).toBe(16);
     expect(h.db.count('generation_log')).toBe(1);
     expect((((await h.kv.get('topic-coverage-map', 'json')) as unknown as TopicCoverageMap).version)).toBe(2);
 
@@ -496,7 +496,7 @@ describe('pipeline happy path (cron)', () => {
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=300, stale-while-revalidate=21000');
     expect(res.headers.get('Access-Control-Allow-Origin')).toBe('https://frontend.test');
     const payload = (await res.json()) as { cards: Array<Record<string, unknown>>; batchDate: string };
-    expect(payload.cards).toHaveLength(50);
+    expect(payload.cards).toHaveLength(16);
     expect(payload.batchDate).toBe(today);
     const first = payload.cards[0];
     expect(first).toHaveProperty('createdAt');
@@ -511,7 +511,7 @@ describe('pipeline happy path (cron)', () => {
     h.db.sqlite.exec('DELETE FROM generated_cards');
     const res2 = await handleToday(new Request('https://api.test/api/cards/today'), h.env, withCors(h.env));
     const payload2 = (await res2.json()) as { cards: unknown[] };
-    expect(payload2.cards).toHaveLength(50);
+    expect(payload2.cards).toHaveLength(16);
   });
 
   test('GET /api/cards paginates, filters by category/tag/date, and clamps params', async () => {
@@ -525,10 +525,10 @@ describe('pipeline happy path (cron)', () => {
     expect(all.headers.get('Cache-Control')).toBe('public, max-age=3600');
     const allBody = (await all.json()) as { cards: unknown[]; pagination: { page: number; limit: number; total: number; pages: number } };
     expect(allBody.cards).toHaveLength(10);
-    expect(allBody.pagination).toEqual({ page: 1, limit: 10, total: 50, pages: 5 });
+    expect(allBody.pagination).toEqual({ page: 1, limit: 10, total: 16, pages: 2 });
 
-    const page3 = (await (await call('?limit=10&page=3')).json()) as { cards: unknown[] };
-    expect(page3.cards).toHaveLength(10);
+    const page2 = (await (await call('?limit=10&page=2')).json()) as { cards: unknown[] };
+    expect(page2.cards).toHaveLength(6); // 16 cards over 2 pages of 10
 
     const emptyPage = (await (await call('?limit=10&page=99')).json()) as { cards: unknown[] };
     expect(emptyPage.cards).toHaveLength(0);
@@ -548,10 +548,10 @@ describe('pipeline happy path (cron)', () => {
     expect(byTag.cards.every((c) => c.tags.includes('Mindset'))).toBe(true);
 
     const byDate = (await (await call(`?date=${today}`)).json()) as { pagination: { total: number } };
-    expect(byDate.pagination.total).toBe(50);
+    expect(byDate.pagination.total).toBe(16);
 
     const badDate = (await (await call('?date=not-a-date')).json()) as { pagination: { total: number } };
-    expect(badDate.pagination.total).toBe(50); // invalid date ignored
+    expect(badDate.pagination.total).toBe(16); // invalid date ignored
 
     expect(h.kv.has('api-cache:today')).toBe(false);
     const list = await h.kv.list({ prefix: 'api-cache:cards:', limit: 100 });
@@ -584,18 +584,18 @@ describe('dedup soundness', () => {
 
     await runCron(h);
 
-    expect(h.db.count('generated_cards')).toBe(51); // 50 new + 1 pre-existing
+    expect(h.db.count('generated_cards')).toBe(17); // 16 new + 1 pre-existing
     const newRows = h.db.rows<CardRow>(`SELECT title, title_hash FROM generated_cards WHERE batch_date = '${today}'`);
-    expect(newRows).toHaveLength(50);
+    expect(newRows).toHaveLength(16);
     expect(newRows.some((r) => r.title === 'Fresh Original Idea')).toBe(true);
     expect(newRows.some((r) => r.title === 'Pre Existing Concept')).toBe(false);
     const hashes = new Set(newRows.map((r) => r.title_hash));
-    expect(hashes.size).toBe(50);
+    expect(hashes.size).toBe(16);
 
     const log = h.db.rows<{ status: string; generated: number; duplicates_skip: number }>(
       'SELECT status, generated, duplicates_skip FROM generation_log',
     );
-    expect(log[0]).toMatchObject({ status: 'success', generated: 50, duplicates_skip: 1 });
+    expect(log[0]).toMatchObject({ status: 'success', generated: 16, duplicates_skip: 1 });
   });
 
   test('two expansion batches returning the same title insert exactly one row', async () => {
@@ -615,7 +615,7 @@ describe('dedup soundness', () => {
     await runCron(h);
     const twins = h.db.rows<CardRow>("SELECT title FROM generated_cards WHERE title = 'Cross Batch Twin'");
     expect(twins).toHaveLength(1);
-    expect(h.db.count('generated_cards')).toBe(49);
+    expect(h.db.count('generated_cards')).toBe(15);
   });
 });
 
@@ -657,12 +657,115 @@ describe('canonical category enforcement', () => {
       return defaultScript(kind, body);
     });
 
-    const result = await runGeneration(h.env, h.ctx as unknown as ExecutionContext, { requested: 1 });
+    // requested: 5 so round-robin reaches the Tech slot (candidate 1, the
+    // upper-cased 'TECH' one) — with 1 only the first category is selected.
+    const result = await runGeneration(h.env, h.ctx as unknown as ExecutionContext, { requested: 5 });
 
     expect(result.status).toBe('success');
     expect(result.warnings).toHaveLength(1); // only the KV-map fallback warning
     const row = h.db.rows<CardRow>("SELECT category FROM generated_cards WHERE title = 'Generated Concept Number 1'")[0];
     expect(row.category).toBe('Tech');
+  });
+});
+
+describe('per-category quota selection (2026-09-26 spec: 2 per category per day)', () => {
+  test('3 candidates per category -> exactly 2 per category selected (16 cards)', async () => {
+    const titlePrompts: string[] = [];
+    stubFetch((kind, body) => {
+      if (kind === 'title') {
+        titlePrompts.push(body);
+        return { content: JSON.stringify({ titles: makeTitleCandidates(24) }) };
+      }
+      return defaultScript(kind, body);
+    });
+
+    await runCron(h);
+
+    expect(h.db.count('generated_cards')).toBe(16);
+    const rows = h.db.rows<CardRow>(`SELECT category FROM generated_cards WHERE batch_date = '${today}'`);
+    const perCategory = new Map<string, number>();
+    for (const r of rows) perCategory.set(r.category, (perCategory.get(r.category) ?? 0) + 1);
+    for (const category of CANONICAL_CATEGORIES) expect(perCategory.get(category)).toBe(2);
+
+    // The title prompt stated the quota explicitly: ceil(16/8) + 1 = 3 per
+    // category, 24 titles total.
+    expect(titlePrompts[0]).toContain('exactly 3 titles for EACH');
+    expect(titlePrompts[0]).toContain('24 titles in total');
+
+    expect(
+      h.db.rows<{ status: string; requested: number; generated: number }>(
+        'SELECT status, requested, generated FROM generation_log',
+      )[0],
+    ).toMatchObject({ status: 'success', requested: 16, generated: 16 });
+  });
+
+  test('a category whose candidates all drop lets the others top up and is named in a warning', async () => {
+    stubFetch((kind, body) => {
+      if (kind === 'title') {
+        const titles = makeTitleCandidates(24).map((t) =>
+          t.category === 'Mindset' ? { ...t, category: 'History' } : t, // off-schema -> all 3 dropped
+        );
+        return { content: JSON.stringify({ titles }) };
+      }
+      return defaultScript(kind, body);
+    });
+
+    const result = await runGeneration(h.env, h.ctx as unknown as ExecutionContext);
+
+    // 7 healthy categories x 3 candidates: 2 rounds of 7, then a top-up round
+    // reaches the 16 target without Mindset.
+    expect(result.status).toBe('success');
+    expect(result.generated).toBe(16);
+    expect(result.warnings).toContain('no titles selected for 1 of the 8 categories (Mindset)');
+    const rows = h.db.rows<CardRow>(`SELECT category FROM generated_cards WHERE batch_date = '${today}'`);
+    expect(rows).toHaveLength(16);
+    expect(rows.some((r) => r.category === 'Mindset')).toBe(false);
+    expect(rows.every((r) => (CANONICAL_CATEGORIES as readonly string[]).includes(r.category))).toBe(true);
+  });
+
+  test('a category short of its quota is topped up by the others without over-selecting it', async () => {
+    // Mindset keeps only 1 candidate (below its quota of 2) — the selection
+    // must skip its missing rounds, not push undefined entries.
+    stubFetch((kind, body) => {
+      if (kind === 'title') {
+        let mindsetSeen = 0;
+        const titles = makeTitleCandidates(24).map((t) => {
+          if (t.category !== 'Mindset') return t;
+          mindsetSeen++;
+          return mindsetSeen === 1 ? t : { ...t, category: 'Creativity' };
+        });
+        return { content: JSON.stringify({ titles }) };
+      }
+      return defaultScript(kind, body);
+    });
+
+    const result = await runGeneration(h.env, h.ctx as unknown as ExecutionContext);
+
+    expect(result.status).toBe('success');
+    expect(result.generated).toBe(16);
+    const rows = h.db.rows<CardRow>(`SELECT category FROM generated_cards WHERE batch_date = '${today}'`);
+    expect(rows).toHaveLength(16);
+    expect(rows.filter((r) => r.category === 'Mindset')).toHaveLength(1);
+    // Mindset's shortfall is covered by the top-up round, dealt in canonical
+    // order: Health reaches 3, quota-holding categories stay at 2.
+    expect(rows.filter((r) => r.category === 'Health & Wellbeing')).toHaveLength(3);
+    expect(rows.filter((r) => r.category === 'Creativity')).toHaveLength(2);
+    expect(result.warnings).toEqual(['topic-coverage-map missing or corrupt in KV; using the baked-in default map']);
+  });
+
+  test('manual requested: 5 override -> 5 cards spread round-robin across categories', async () => {
+    stubFetch(defaultScript);
+
+    const result = await runGeneration(h.env, h.ctx as unknown as ExecutionContext, { requested: 5 });
+
+    expect(result.status).toBe('success');
+    expect(result.generated).toBe(5);
+    const rows = h.db.rows<CardRow>(`SELECT category FROM generated_cards WHERE batch_date = '${today}'`);
+    // Round-robin fills categories in canonical order, one each, before any
+    // category gets a second card.
+    expect(rows.map((r) => r.category)).toEqual(CANONICAL_CATEGORIES.slice(0, 5));
+    // No zero-selected warnings: the leftover categories were simply not needed.
+    expect(result.warnings).toEqual(['topic-coverage-map missing or corrupt in KV; using the baked-in default map']);
   });
 });
 
@@ -705,21 +808,25 @@ describe('hostile AI output', () => {
     });
 
     await runCron(h);
-    // 6 valid cards per batch x 5 batches = 30 (< 40 => partial).
-    expect(h.db.count('generated_cards')).toBe(30);
+    // 6 valid cards per batch x 2 batches (16 targets) = 12 (< 12.8 => partial).
+    expect(h.db.count('generated_cards')).toBe(12);
     const log = h.db.rows<{ status: string; generated: number; error: string | null }>(
       'SELECT status, generated, error FROM generation_log',
     );
-    expect(log[0]).toMatchObject({ status: 'partial', generated: 30 });
+    expect(log[0]).toMatchObject({ status: 'partial', generated: 12 });
     expect(log[0].error).toContain('produced no valid card');
   });
 
-  test('100 candidates when 60 requested are capped at the requested 50', async () => {
+  test('100 candidates are still capped at the 16-card daily default (2 per category)', async () => {
     stubFetch((kind, body) =>
       kind === 'title' ? { content: JSON.stringify({ titles: makeTitleCandidates(100) }) } : defaultScript(kind, body),
     );
     await runCron(h);
-    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generated_cards')).toBe(16);
+    const rows = h.db.rows<{ category: string }>('SELECT category FROM generated_cards');
+    for (const category of CANONICAL_CATEGORIES) {
+      expect(rows.filter((r) => r.category === category)).toHaveLength(2);
+    }
     expect(h.db.rows<{ status: string }>('SELECT status FROM generation_log')[0].status).toBe('success');
   });
 
@@ -753,7 +860,7 @@ describe('concurrent-run lock (D1 partial unique index)', () => {
     db.sqlite
       .prepare(
         `INSERT INTO generation_log (id, batch_date, requested, generated, duplicates_skip, duration_ms, model, status, error, created_at)
-         VALUES (?, ?, 50, 0, 0, 0, 'test-model', 'running', NULL, ?)`,
+         VALUES (?, ?, ${DEFAULT_DAILY_REQUESTED}, 0, 0, 0, 'test-model', 'running', NULL, ?)`,
       )
       .run(crypto.randomUUID(), batchDate, createdAt);
   }
@@ -781,11 +888,11 @@ describe('concurrent-run lock (D1 partial unique index)', () => {
     const result = await runGeneration(h.env, h.ctx as unknown as ExecutionContext);
 
     expect(result.status).toBe('success');
-    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generated_cards')).toBe(16);
     // The stale row was swept; the run's own lock row was finalized in place.
     const rows = h.db.rows<{ status: string; generated: number }>('SELECT status, generated FROM generation_log');
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ status: 'success', generated: 50 });
+    expect(rows[0]).toMatchObject({ status: 'success', generated: 16 });
     expect(h.db.rows<{ id: string }>("SELECT id FROM generation_log WHERE status = 'running'")).toHaveLength(0);
   });
 
@@ -809,7 +916,7 @@ describe('concurrent-run lock (D1 partial unique index)', () => {
     stubFetch(defaultScript);
     const retry = await runGeneration(h.env, h.ctx as unknown as ExecutionContext);
     expect(retry.status).toBe('success');
-    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generated_cards')).toBe(16);
     expect(h.db.count('generation_log')).toBe(2);
   });
 
@@ -892,7 +999,7 @@ describe('admin route, auth and CORS', () => {
     await runCron(h);
     const stats = await fetchHandler(new Request('https://api.test/api/stats'), h.env, ctx);
     const statsBody = (await stats.json()) as { totalCards: number; totalBatches: number; lastBatchDate: string; topicMapVersion: number };
-    expect(statsBody).toMatchObject({ totalCards: 50, totalBatches: 1, lastBatchDate: today, topicMapVersion: 2 });
+    expect(statsBody).toMatchObject({ totalCards: 16, totalBatches: 1, lastBatchDate: today, topicMapVersion: 2 });
     expect(stats.headers.get('Cache-Control')).toBe('max-age=300');
 
     const generate = await runGeneration(h.env, h.ctx as unknown as ExecutionContext, { requested: 1 });
@@ -905,7 +1012,7 @@ describe('admin run-sync (POST /api/run-sync — pipeline awaited inline)', () =
     db.sqlite
       .prepare(
         `INSERT INTO generation_log (id, batch_date, requested, generated, duplicates_skip, duration_ms, model, status, error, created_at)
-         VALUES (?, ?, 50, 50, 0, 0, 'test-model', 'success', NULL, ?)`,
+         VALUES (?, ?, ${DEFAULT_DAILY_REQUESTED}, ${DEFAULT_DAILY_REQUESTED}, 0, 0, 'test-model', 'success', NULL, ?)`,
       )
       .run(crypto.randomUUID(), batchDate, new Date().toISOString());
   }
@@ -1014,7 +1121,7 @@ describe('admin run-sync (POST /api/run-sync — pipeline awaited inline)', () =
     const retry = await runSync(h, { headers: { Authorization: 'Bearer test-admin-secret' } });
     expect(retry.status).toBe(200);
     expect(((await retry.json()) as { status: string }).status).toBe('completed');
-    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generated_cards')).toBe(16);
   });
 
   test('worker.fetch dispatch: POST /api/run-sync runs inline, GET is a 405', async () => {
@@ -1035,7 +1142,7 @@ describe('admin run-sync (POST /api/run-sync — pipeline awaited inline)', () =
     );
     expect(res.status).toBe(200);
     expect(((await res.json()) as { status: string }).status).toBe('completed');
-    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generated_cards')).toBe(16);
     await h.ctx.settle(); // cache invalidation was handed to waitUntil
   });
 });
@@ -1099,7 +1206,7 @@ describe('manual run queue (POST /api/generate → run_requests → */15 poller)
     expect(h.db.count('generated_cards')).toBe(0);
 
     await runPoller(h);
-    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generated_cards')).toBe(16);
     expect(h.db.count('run_requests')).toBe(0);
     expect(h.db.rows<{ status: string }>('SELECT status FROM generation_log')[0].status).toBe('success');
   });
@@ -1107,7 +1214,7 @@ describe('manual run queue (POST /api/generate → run_requests → */15 poller)
   test('admin POST when the day is already completed → 200 already_completed, nothing queued', async () => {
     stubFetch(defaultScript);
     await runCron(h);
-    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generated_cards')).toBe(16);
 
     const res = await runAdmin(h, { headers: { Authorization: 'Bearer test-admin-secret' } });
     expect(res.status).toBe(200);
@@ -1122,7 +1229,7 @@ describe('manual run queue (POST /api/generate → run_requests → */15 poller)
 
     await runCron(h); // helper fires controller.cron = '0 5 * * *'
 
-    expect(h.db.count('generated_cards')).toBe(50);
+    expect(h.db.count('generated_cards')).toBe(16);
     expect(h.db.count('generation_log')).toBe(1);
     expect(h.db.rows<{ status: string }>('SELECT status FROM generation_log')[0].status).toBe('success');
   });

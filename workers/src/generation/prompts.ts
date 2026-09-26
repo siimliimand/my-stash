@@ -1,14 +1,28 @@
 /**
  * Prompt templates — single source of truth, copied VERBATIM from plan §12.
- * Do not reword these; the plan is authoritative.
+ * Do not reword these; the plan is authoritative. The one exception is
+ * TITLE_GENERATION_PROMPT: the 2026-09-26 product spec change (2 cards per
+ * category per day — README "Deviations" #20) added the per-category quota
+ * section and replaced the fixed 60-title ask with a quota-derived total.
  */
 
-export const TITLE_GENERATION_PROMPT = (topicMap: string): string => `
+import { CANONICAL_CATEGORIES } from './categories';
+
+export const TITLE_GENERATION_PROMPT = (topicMap: string, quota: number): string => {
+  const perCategory = quota + 1;
+  const total = perCategory * CANONICAL_CATEGORIES.length;
+  return `
 You are a microlearning content curator for "My Stash" — an app that helps people
 collect bite-sized ideas across all areas of life.
 
-Generate exactly 60 unique microlearning card titles for concepts a curious person
+Generate exactly ${total} unique microlearning card titles for concepts a curious person
 would genuinely want to learn about.
+
+PER-CATEGORY QUOTA REQUIREMENT:
+Propose exactly ${perCategory} titles for EACH of these ${CANONICAL_CATEGORIES.length}
+categories — ${total} titles in total. Every title's category MUST be one of
+these exact strings; anything else is discarded:
+${CANONICAL_CATEGORIES.map((category) => `- ${category}`).join('\n')}
 
 TOPIC DIVERSITY REQUIREMENT:
 Include ideas from ALL of these domains (not only business):
@@ -42,6 +56,7 @@ OUTPUT FORMAT — respond ONLY with this JSON, no other text:
   ]
 }
 `.trim();
+};
 
 export const NEAR_DEDUP_PROMPT = (existing: string[], candidates: unknown[]): string => `
 You are a deduplication filter. Identify which candidate titles are too semantically

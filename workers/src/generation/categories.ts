@@ -3,7 +3,7 @@
  * showed it freewheels ("Technology", "History", "Philosophy") when the
  * string it stamps on a candidate is trusted — so candidates are normalized
  * against an explicit alias map, and anything still non-canonical is dropped
- * (the 60-title surplus absorbs the loss). */
+ * (the prompt's surplus quota absorbs the loss). */
 
 import type { TitleCandidate } from '../lib/types';
 
@@ -17,6 +17,16 @@ export const CANONICAL_CATEGORIES = [
   'Productivity',
   'Science',
 ] as const;
+
+/** Cards each canonical category must contribute per day (2026-09-26 product
+ * spec change: the old free-for-all 50/day let the model skew the batch toward
+ * whichever category it fancied — a fixed per-category quota guarantees an
+ * even spread). */
+export const CARDS_PER_CATEGORY_PER_DAY = 2;
+
+/** The daily batch target when no `requested` override is given: every
+ * canonical category contributes its quota (8 x 2 = 16). */
+export const DEFAULT_DAILY_REQUESTED = CANONICAL_CATEGORIES.length * CARDS_PER_CATEGORY_PER_DAY;
 
 export type CanonicalCategory = (typeof CANONICAL_CATEGORIES)[number];
 

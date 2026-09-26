@@ -19,7 +19,7 @@ import {
   parseTitleList,
   sha256Prefix,
 } from './dedup';
-import { enforceCanonicalCategories } from './categories';
+import { CANONICAL_CATEGORIES, DEFAULT_DAILY_REQUESTED, enforceCanonicalCategories } from './categories';
 import {
   CARD_EXPANSION_PROMPT,
   MAP_UPDATE_PROMPT,
@@ -69,12 +69,13 @@ const TODAY_CACHE_KEY = 'api-cache:today';
 const CARDS_CACHE_PREFIX = 'api-cache:cards:';
 
 export interface RunGenerationOptions {
-  /** Target number of cards for this run (1–50). Cron uses 50. */
+  /** Target number of cards for this run (1–50 manual override). Cron uses
+   * the daily default: 2 cards per canonical category (16). */
   requested?: number;
 }
 
 function clampRequested(value: number | undefined): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 50;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_DAILY_REQUESTED;
   return Math.min(50, Math.max(1, Math.floor(value)));
 }
 
@@ -93,6 +94,43 @@ function pairCandidate(card: ExpandedCard, batch: CandidateWithHash[], index: nu
   return batch[index]?.candidate;
 }
 
+/** Per-category selection (2026-09-26 spec change: exactly
+ * CARDS_PER_CATEGORY_PER_DAY cards per category per day) — replaces the old
+ * global slice(0, requested). Candidates are grouped per canonical category
+ * in model order, then dealt round-robin (take-earliest within a category,
+ * canonical order across them): a first pass takes up to `quota` titles per
+ * category, and a second pass tops up from each category's remaining surplus
+ * so a category that under-delivered lets the others fill the gap. Stops at
+ * `requested` or when every list is exhausted. */
+function selectAcrossCategories(entries: CandidateWithHash[], requested: number, quota: number): CandidateWithHash[] {
+  const byCategory = new Map<string, CandidateWithHash[]>();
+  for (const entry of entries) {
+    const list = byCategory.get(entry.candidate.category);
+    if (list === undefined) byCategory.set(entry.candidate.category, [entry]);
+    else list.push(entry);
+  }
+  const categories = CANONICAL_CATEGORIES.filter((category) => byCategory.has(category));
+  const selected: CandidateWithHash[] = [];
+  // One round deals one title to each category that still has one.
+  const dealRound = (round: number): boolean => {
+    let progressed = false;
+    for (const category of categories) {
+      if (selected.length >= requested) break;
+      const list = byCategory.get(category);
+      if (list !== undefined && round < list.length) {
+        selected.push(list[round]);
+        progressed = true;
+      }
+    }
+    return progressed;
+  };
+  for (let round = 0; round < quota && selected.length < requested; round++) dealRound(round);
+  for (let round = quota; selected.length < requested; round++) {
+    if (!dealRound(round)) break;
+  }
+  return selected;
+}
+
 export async function runGeneration(
   env: Env,
   ctx: ExecutionContext | null,
@@ -101,6 +139,10 @@ export async function runGeneration(
   const startedAt = Date.now();
   const today = new Date().toISOString().slice(0, 10);
   const requested = clampRequested(opts.requested);
+  // Per-category selection quota (2026-09-26 spec): ceil(requested / 8), so 2
+  // for the default 16. The title prompt asks for quota + 1 candidates per
+  // category to keep a per-category surplus, like the old 60-for-50 ask.
+  const quota = Math.ceil(requested / CANONICAL_CATEGORIES.length);
   const warnings: string[] = [];
 
   // ---- Step 0: strongly-consistent per-day run lock. A partial UNIQUE index
@@ -180,9 +222,10 @@ export async function runGeneration(
     const { map: currentMap, usedFallback } = await loadTopicMap(env);
     if (usedFallback) warnings.push('topic-coverage-map missing or corrupt in KV; using the baked-in default map');
 
-    // ---- Step 3: generate 60 title candidates (callAIJson retries internally:
-    // a doubled cap when the response was truncated, then a stricter prompt)
-    const titleUser = TITLE_GENERATION_PROMPT(JSON.stringify(currentMap));
+    // ---- Step 3: generate title candidates, quota + 1 per category (3 x 8 =
+    // 24 for the default 16; callAIJson retries internally: a doubled cap when
+    // the response was truncated, then a stricter prompt)
+    const titleUser = TITLE_GENERATION_PROMPT(JSON.stringify(currentMap), quota);
     const titleOpts = {
       system: SYSTEM_TITLE,
       user: titleUser,
@@ -205,9 +248,9 @@ export async function runGeneration(
 
     // ---- Step 3b: hard-enforce the canonical categories — the title AI
     // freewheels ("Technology", "History", ...): alias-normalize first, then
-    // drop anything still non-canonical BEFORE dedup and the 60→50 selection
-    // cut, so the surplus absorbs the loss and no AI calls are spent on
-    // candidates that can never be inserted.
+    // drop anything still non-canonical BEFORE dedup and the per-category
+    // selection cut, so the per-category surplus absorbs the loss and no AI
+    // calls are spent on candidates that can never be inserted.
     const { candidates, droppedCategories } = enforceCanonicalCategories(parsedTitles ?? []);
     if (droppedCategories.length > 0) {
       const names = [...new Set(droppedCategories)].sort().join(', ');
@@ -263,7 +306,8 @@ export async function runGeneration(
         const approvedKeys = new Set(approvedTitles.map((t) => normalizeTitle(t)));
         const filtered = unique.filter((entry) => approvedKeys.has(normalizeTitle(entry.candidate.title)));
         // An empty approval against a healthy candidate list is far more likely
-        // a model failure than 60 genuine duplicates — keep everything instead.
+        // a model failure than every candidate being a genuine duplicate —
+        // keep everything instead.
         if (filtered.length === 0 && unique.length >= MIN_CANDIDATES) {
           warnings.push('near-dedup filter approved nothing; proceeding with the unfiltered list');
         } else {
@@ -275,10 +319,28 @@ export async function runGeneration(
       warnings.push(`near-dedup AI call failed (${err instanceof Error ? err.message : String(err)}); proceeding without it`);
     }
 
-    // Take the first N targets (cron: 50; manual runs may request fewer).
-    const targets = approved.slice(0, requested);
+    // Per-category selection: up to `quota` per category first, then top-up
+    // rounds from the remaining surplus (a category whose candidates were all
+    // dropped or deduplicated is covered by the others).
+    const targets = selectAcrossCategories(approved, requested, quota);
 
-    // ---- Step 6: expand approved titles into full cards, 5 batches of 10
+    // A category that contributed nothing (its candidates were all dropped or
+    // deduplicated away) broke the even-spread guarantee — say so. Categories
+    // with candidates left unselected are simply not needed to reach
+    // `requested` (small manual runs) and are not a fault.
+    const selectedCategories = new Set(targets.map((entry) => entry.candidate.category));
+    const emptyCategories = CANONICAL_CATEGORIES.filter(
+      (category) =>
+        !selectedCategories.has(category) && !approved.some((entry) => entry.candidate.category === category),
+    );
+    if (emptyCategories.length > 0) {
+      warnings.push(
+        `no titles selected for ${emptyCategories.length} of the ${CANONICAL_CATEGORIES.length} categories (${emptyCategories.join(', ')})`,
+      );
+    }
+
+    // ---- Step 6: expand approved titles into full cards, batches of 10
+    // (2–3 batches for the default 16)
     let batchJsonFailures = 0;
     let invalidCards = 0;
     const expansionBatches = chunkArray(targets, EXPANSION_BATCH_SIZE);

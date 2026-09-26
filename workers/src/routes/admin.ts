@@ -11,6 +11,7 @@
 
 import { alreadyRanToday, queueRunRequest } from '../lib/db';
 import { runGeneration } from '../generation/pipeline';
+import { DEFAULT_DAILY_REQUESTED } from '../generation/categories';
 import { jsonResponse, type CorsHeaders } from '../lib/cors';
 import type { Env, PipelineResult } from '../lib/types';
 
@@ -52,11 +53,12 @@ export function guardAdminAccess(request: Request, env: Env, cors: CorsHeaders):
 
 /**
  * Shared body parse for both admin endpoints: optional `{ "requested": n }`
- * clamped to 1–50, default 50. Invalid JSON, or a `requested` that is not a
+ * clamped to 1–50, defaulting to the daily target of 2 cards per canonical
+ * category (16). Invalid JSON, or a `requested` that is not a
  * number, returns the 400 response; otherwise the parsed value.
  */
 export async function parseRequested(request: Request, cors: CorsHeaders): Promise<{ requested: number } | Response> {
-  let requested = 50;
+  let requested = DEFAULT_DAILY_REQUESTED;
   const rawBody = await request.text();
   if (rawBody.trim().length > 0) {
     let parsedBody: unknown;

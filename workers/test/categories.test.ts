@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   CANONICAL_CATEGORIES,
+  CARDS_PER_CATEGORY_PER_DAY,
+  DEFAULT_DAILY_REQUESTED,
   canonicalCategory,
   enforceCanonicalCategories,
 } from '../src/generation/categories';
@@ -12,6 +14,14 @@ describe('CANONICAL_CATEGORIES', () => {
     for (const category of CANONICAL_CATEGORIES) {
       expect(canonicalCategory(category)).toBe(category);
     }
+  });
+});
+
+describe('daily quota constants (2026-09-26 spec)', () => {
+  it('derives the daily default from 2 cards per category', () => {
+    expect(CARDS_PER_CATEGORY_PER_DAY).toBe(2);
+    expect(DEFAULT_DAILY_REQUESTED).toBe(CANONICAL_CATEGORIES.length * CARDS_PER_CATEGORY_PER_DAY);
+    expect(DEFAULT_DAILY_REQUESTED).toBe(16);
   });
 });
 
