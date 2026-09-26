@@ -25,16 +25,15 @@ these exact strings; anything else is discarded:
 ${CANONICAL_CATEGORIES.map((category) => `- ${category}`).join('\n')}
 
 TOPIC DIVERSITY REQUIREMENT:
-Include ideas from ALL of these domains (not only business):
-- Mindset, psychology, cognitive biases
-- Productivity and time management
-- Personal finance and investing
-- Technology, software, AI
-- Creativity and design thinking
-- Health, sleep, exercise, nutrition
-- Leadership, negotiation, communication
-- Science, philosophy, history
-- Relationships and social dynamics
+Include ideas from ALL of these canonical categories (these are the ONLY valid category strings — do not invent other categories):
+- Mindset: cognitive biases, mental models, psychology, decision-making, behavioral economics
+- Productivity: time management, focus, systems thinking, workflows, habit design
+- Finance: investing, behavioral finance, personal finance, economics, market psychology
+- Tech: software design, AI/ML, security, distributed systems, architecture principles
+- Creativity: design thinking, idea generation, creative process, lateral thinking
+- Health & Wellbeing: sleep science, exercise physiology, nutrition, stress management, longevity
+- Leadership & Communication: negotiation, feedback, storytelling, influence, team dynamics
+- Science: physics, neuroscience, biology, chemistry, history of science, mathematics
 
 DEDUPLICATION REQUIREMENT:
 The coverage map below shows what has ALREADY been generated. Do NOT repeat
@@ -80,12 +79,15 @@ You are a microlearning card writer. Write clear, insightful, actionable cards
 that a curious person can absorb in 2–3 minutes.
 
 WRITING RULES:
-- Length: 80–150 words per card body (soft limit)
-- Tone: educational but conversational — not corporate jargon
-- Structure: start with a core insight, then explain with examples or sub-points
-- Formatting: use **bold** for key terms, *italic* for emphasis, - lists for steps or examples
-- Source: cite a real book, paper, person, or study. Never invent a source.
-- Tags: pick 1–3 from: Mindset, Productivity, Finance, Tech, Creativity, Health, Leadership
+- Length: 80–150 words per card body (soft limit; keep under 180 words)
+- Tone: educational, punchy, conversational — avoid corporate buzzwords and dry textbook definitions
+- Structure:
+  1. Start with a bold core thesis (**Core Insight in bold**)
+  2. Ground it with a concrete hook: a specific study finding, a named person's real experience, or a vivid before/after scenario. Never write purely abstract definitions.
+  3. Actionable takeaway ("So what?"): End with a practical takeaway or behavioral trigger ("When X happens, do Y").
+- Formatting: use **bold** for key terms, *italic* for emphasis, and bulleted lists (-) for steps or examples
+- Source: cite the most specific real book, paper, person, or study you are confident in (e.g. "Book Title — Author Name" or "Paper Title (Year) — Authors"). If not attributable to a specific work, cite the general field or originator truthfully (e.g. "Widely attributed in behavioral economics"). NEVER invent fake studies or citations.
+- Tags: pick 1–3 from: Mindset, Productivity, Finance, Tech, Creativity, Health, Leadership, Science
 
 OUTPUT FORMAT — respond ONLY with this JSON array, no other text:
 [

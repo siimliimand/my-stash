@@ -34,14 +34,14 @@
       "Chemistry & Matter": ["periodic trends", "catalysis", "polymers"]
     },
     "Health & Wellbeing": {
-      "Sleep": [],
-      "Exercise": [],
-      "Nutrition": []
+      "Sleep": ["sleep-debt-myth", "adenosine-and-caffeine", "sleep-stages", "circadian-rhythm-alignment"],
+      "Exercise": ["minimum-effective-dose", "zone-2-training", "progressive-overload", "movement-snacks"],
+      "Nutrition": ["glycemic-index", "protein-distribution", "microbiome-diversity", "energy-balance-basics"]
     },
     "Leadership & Communication": {
-      "Negotiation": [],
-      "Feedback": [],
-      "Storytelling": []
+      "Negotiation": ["batna-concept", "anchoring-in-negotiation", "principled-negotiation", "tactical-empathy"],
+      "Feedback": ["radical-candor", "situation-behavior-impact", "feedforward-technique", "psychological-safety-signals"],
+      "Storytelling": ["pixar-story-spine", "narrative-arc-in-business", "data-storytelling", "anecdote-as-evidence"]
     }
   }
 }
