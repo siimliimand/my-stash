@@ -20,7 +20,8 @@ workers/
 │   │   ├── topic-map.ts      # coverage map load/validate/merge (+ local fallback)
 │   │   ├── ai-client.ts      # OpenRouter wrapper: retries, JSON mode, validation
 │   │   ├── prompts.ts        # the four prompt templates (plan §12, verbatim)
-│   │   └── dedup.ts          # normalizeTitle, sha256Prefix, AI-output validators
+│   │   ├── dedup.ts          # normalizeTitle, sha256Prefix, AI-output validators
+│   │   └── categories.ts     # the 8 canonical categories + alias enforcement
 │   └── lib/
 │       ├── db.ts             # D1 helpers (chunked IN, batched inserts, log)
 │       ├── kv.ts             # typed KV helpers, cache get/put/delete-by-prefix
@@ -365,3 +366,21 @@ stricter-prompt retry; if every attempt still fails, the thrown error mentions
       -d '{"requested": 50}'
     # -> 200 {"status":"completed","batchDate":"<today>",...} after ~90 s
     ```
+19. **Canonical categories are hard-enforced at title-candidate validation** —
+    the plan never constrains the `category` string the title AI stamps on
+    each candidate, and the 2026-09-26 production run showed what that costs:
+    9 off-schema cards landed (6 "Technology", 2 "History", 1 "Philosophy").
+    The 6 Technology cards were remapped to Tech in place by SQL; the 3
+    History/Philosophy cards were intentionally LEFT as published — content
+    quality over schema purity for already-visible cards (PM decision). The
+    pipeline now trusts nothing: the plan's 8 categories live once in
+    `src/generation/categories.ts` (`CANONICAL_CATEGORIES`); every candidate
+    is alias-normalized case-insensitively (`Technology` → `Tech`, plus the
+    plan's own "Health" / "Leadership" / "Communication" shorthands from the
+    §12 tag lists and the §7 example output) with the canonical spelling
+    written back, and anything still non-canonical is DROPPED before the
+    dedup steps and the 60→50 selection cut — the 60-title surplus absorbs
+    the loss, and no expansion AI calls are spent on doomed candidates. Each
+    drop is surfaced as a run warning ("dropped N title(s) with
+    non-canonical categories (…names…)"). The free-text `subcategory` field
+    is deliberately untouched — only categories are enumerated.

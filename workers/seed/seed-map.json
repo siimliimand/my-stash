@@ -28,6 +28,11 @@
       "Idea Generation": ["lateral thinking", "constraints as catalysts", "bisociation"],
       "Creative Process": ["incubation phase", "divergent vs convergent thinking"]
     },
+    "Science": {
+      "Physics & Space": ["entropy", "orbital mechanics", "speed of light"],
+      "Biology & The Body": ["neuroplasticity", "gut microbiome", "circadian rhythm"],
+      "Chemistry & Matter": ["periodic trends", "catalysis", "polymers"]
+    },
     "Health & Wellbeing": {
       "Sleep": [],
       "Exercise": [],

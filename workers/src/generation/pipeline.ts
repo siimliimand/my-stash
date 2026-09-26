@@ -19,6 +19,7 @@ import {
   parseTitleList,
   sha256Prefix,
 } from './dedup';
+import { enforceCanonicalCategories } from './categories';
 import {
   CARD_EXPANSION_PROMPT,
   MAP_UPDATE_PROMPT,
@@ -202,7 +203,16 @@ export async function runGeneration(
       );
     }
 
-    const candidates = parsedTitles ?? [];
+    // ---- Step 3b: hard-enforce the canonical categories — the title AI
+    // freewheels ("Technology", "History", ...): alias-normalize first, then
+    // drop anything still non-canonical BEFORE dedup and the 60→50 selection
+    // cut, so the surplus absorbs the loss and no AI calls are spent on
+    // candidates that can never be inserted.
+    const { candidates, droppedCategories } = enforceCanonicalCategories(parsedTitles ?? []);
+    if (droppedCategories.length > 0) {
+      const names = [...new Set(droppedCategories)].sort().join(', ');
+      warnings.push(`dropped ${droppedCategories.length} title(s) with non-canonical categories (${names})`);
+    }
     if (candidates.length < MIN_CANDIDATES) {
       return finishEarlyFailed(
         `only ${candidates.length} valid title candidates after validation (minimum ${MIN_CANDIDATES})`,

@@ -26,6 +26,7 @@ import worker from '../src/index';
 import { handleCards, handleToday } from '../src/routes/cards';
 import { handleGenerate, handleRunSync } from '../src/routes/admin';
 import { runGeneration } from '../src/generation/pipeline';
+import { CANONICAL_CATEGORIES } from '../src/generation/categories';
 import { normalizeTitle, sha256Prefix } from '../src/generation/dedup';
 import { mergeTopicsDeterministic } from '../src/generation/topic-map';
 import { consumeRunRequest, queueRunRequest } from '../src/lib/db';
@@ -277,19 +278,9 @@ function makeTitleCandidates(n: number, prefix = 'Generated Concept'): Array<{
   subcategory: string;
   topic_slug: string;
 }> {
-  const cats = [
-    'Mindset',
-    'Productivity',
-    'Finance',
-    'Tech',
-    'Creativity',
-    'Health & Wellbeing',
-    'Leadership & Communication',
-    'Science',
-  ];
   return Array.from({ length: n }, (_, i) => ({
     title: `${prefix} Number ${i + 1}`,
-    category: cats[i % cats.length],
+    category: CANONICAL_CATEGORIES[i % CANONICAL_CATEGORIES.length],
     subcategory: `Subtopic ${(i % 8) + 1}`,
     topic_slug: `${prefix.toLowerCase().replace(/\s+/g, '-')}-number-${i + 1}`,
   }));
@@ -422,6 +413,7 @@ interface CardRow {
   title_hash: string;
   batch_date: string;
   category: string;
+  subcategory: string;
   topic_slug: string;
 }
 
@@ -624,6 +616,53 @@ describe('dedup soundness', () => {
     const twins = h.db.rows<CardRow>("SELECT title FROM generated_cards WHERE title = 'Cross Batch Twin'");
     expect(twins).toHaveLength(1);
     expect(h.db.count('generated_cards')).toBe(49);
+  });
+});
+
+describe('canonical category enforcement', () => {
+  test('Technology is aliased to Tech, History is dropped, and the batch still fills from the surplus', async () => {
+    stubFetch((kind, body) => {
+      if (kind === 'title') {
+        const titles = makeTitleCandidates(60);
+        titles[0] = { ...titles[0], category: 'Technology' }; // known alias
+        titles[1] = { ...titles[1], category: 'History' }; // off-schema -> dropped
+        return { content: JSON.stringify({ titles }) };
+      }
+      return defaultScript(kind, body);
+    });
+
+    const result = await runGeneration(h.env, h.ctx as unknown as ExecutionContext, { requested: 5 });
+
+    expect(result.status).toBe('success');
+    expect(result.generated).toBe(5); // the surplus absorbs the dropped title
+    const rows = h.db.rows<CardRow>(
+      `SELECT title, category, subcategory FROM generated_cards WHERE batch_date = '${today}'`,
+    );
+    expect(rows).toHaveLength(5);
+    expect(rows.find((r) => r.title === 'Generated Concept Number 1')?.category).toBe('Tech');
+    expect(rows.some((r) => r.title === 'Generated Concept Number 2')).toBe(false);
+    expect(rows.every((r) => (CANONICAL_CATEGORIES as readonly string[]).includes(r.category))).toBe(true);
+    // Only categories are enumerated — the free-text subcategory survives.
+    expect(rows.find((r) => r.title === 'Generated Concept Number 1')?.subcategory).toBe('Subtopic 1');
+    expect(result.warnings).toContain('dropped 1 title(s) with non-canonical categories (History)');
+  });
+
+  test('casing differences are normalized to the canonical spelling without a drop warning', async () => {
+    stubFetch((kind, body) => {
+      if (kind === 'title') {
+        const titles = makeTitleCandidates(60);
+        titles[0] = { ...titles[0], category: 'TECH' };
+        return { content: JSON.stringify({ titles }) };
+      }
+      return defaultScript(kind, body);
+    });
+
+    const result = await runGeneration(h.env, h.ctx as unknown as ExecutionContext, { requested: 1 });
+
+    expect(result.status).toBe('success');
+    expect(result.warnings).toHaveLength(1); // only the KV-map fallback warning
+    const row = h.db.rows<CardRow>("SELECT category FROM generated_cards WHERE title = 'Generated Concept Number 1'")[0];
+    expect(row.category).toBe('Tech');
   });
 });
 
