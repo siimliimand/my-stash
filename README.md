@@ -44,7 +44,8 @@ A companion Cloudflare Worker can deliver a daily batch of AI-generated cards (s
 
 - Set `NEXT_PUBLIC_API_URL` (e.g. `https://my-stash-api.workers.dev`) at **build** time — see `.env.example`.
 - If the variable is unset or the API is unreachable, the feature silently disables: no network calls, no AI pill, everything else unchanged.
-- AI cards are not persisted; only your interactions with them (favorites, reviews, edits, deletions) are kept locally under the `my-stash-ai-state` localStorage key.
+- AI cards accumulate on the device: every delivered card is kept in localStorage (`my-stash-ai-cards`), so past daily batches stay in your deck. Sync is incremental — one small request for today's batch per day, plus a one-time paginated backfill of the server archive (50 cards per request) on first run. The server is never queried for the whole history in a single request.
+- Your interactions with AI cards (favorites, reviews, edits, deletions) are kept locally under the `my-stash-ai-state` localStorage key and re-applied on load.
 
 ## Node Version
 

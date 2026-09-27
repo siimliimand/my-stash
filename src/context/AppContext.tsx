@@ -4,20 +4,27 @@ import React, { createContext, useContext, useReducer, useEffect, useCallback, u
 import { AppData, Card, Stash, SortMode, FilterMode } from "@/lib/types";
 import { readStorage, writeStorage, writeStorageImmediate } from "@/lib/storage";
 import { createSeedData } from "@/lib/seed";
-import { fetchTodayCards, isApiConfigured } from "@/lib/api";
+import { fetchTodayCards, fetchArchiveCards, isApiConfigured } from "@/lib/api";
 import {
   AiCardOverrides,
   EMPTY_AI_OVERRIDES,
   applyAiOverrides,
   readAiOverrides,
   writeAiOverrides,
+  readPersistedAiCards,
+  writePersistedAiCards,
 } from "@/lib/aiState";
+
+// One-time archive backfill guard: survives StrictMode's double-mounted
+// effects in dev so the paginated history sync never runs twice in parallel
+// (MERGE dedupes anyway — this just avoids duplicate requests).
+let archiveSyncStarted = false;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
 type AppState = {
   data: AppData;
-  aiCards: Card[]; // raw API cards — in-memory only, never persisted
+  aiCards: Card[]; // accumulated AI-card archive, persisted to its own key
   aiOverrides: AiCardOverrides; // user actions on AI cards, persisted separately
   filter: FilterMode;
   sortMode: SortMode;
@@ -49,6 +56,7 @@ type Action =
   | { type: "SET_INDEX"; index: number }
   | { type: "SET_THEME"; theme: "light" | "dark" | "system" }
   | { type: "SET_AI_CARDS"; cards: Card[] }
+  | { type: "MERGE_AI_CARDS"; cards: Card[] }
   | { type: "SET_AI_OVERRIDES"; overrides: AiCardOverrides };
 
 // AI card = delivered by the API and not also a user card with that id
@@ -69,6 +77,22 @@ function reducer(state: AppState, action: Action): AppState {
 
     case "SET_AI_CARDS":
       return { ...state, aiCards: action.cards };
+
+    // Union by id — existing entries win, unseen cards are appended. Returns
+    // the same state object when nothing is new so the persistence effect
+    // (identity-checked) skips redundant writes.
+    case "MERGE_AI_CARDS": {
+      const known = new Map(state.aiCards.map((c) => [c.id, c] as const));
+      let added = false;
+      for (const card of action.cards) {
+        if (!known.has(card.id)) {
+          known.set(card.id, card);
+          added = true;
+        }
+      }
+      if (!added) return state;
+      return { ...state, aiCards: [...known.values()] };
+    }
 
     case "SET_AI_OVERRIDES":
       return { ...state, aiOverrides: action.overrides };
@@ -280,14 +304,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    // Fetch today's AI cards in the background — never blocks first paint
+    // Hydrate the accumulated AI-card archive from localStorage — instant,
+    // no network. null means nothing stored yet (first run on this device).
+    const storedAiCards = readPersistedAiCards();
+    if (storedAiCards !== null) {
+      dispatch({ type: "SET_AI_CARDS", cards: storedAiCards });
+    }
+
+    // Background sync — never blocks first paint and never loads the whole
+    // database at once: today's small batch first, then (first run only) the
+    // server archive backfilled one 50-card page at a time, merged as each
+    // page lands. Steady state afterwards: one small request per day.
     if (isApiConfigured()) {
       let cancelled = false;
-      fetchTodayCards().then((cards) => {
+      const merge = (cards: Card[]) => {
         if (!cancelled && cards.length > 0) {
-          dispatch({ type: "SET_AI_CARDS", cards });
+          dispatch({ type: "MERGE_AI_CARDS", cards });
         }
-      });
+      };
+      fetchTodayCards().then(merge);
+      if (storedAiCards === null && !archiveSyncStarted) {
+        archiveSyncStarted = true;
+        void fetchArchiveCards(merge);
+      }
       return () => {
         cancelled = true;
       };
@@ -312,6 +351,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     writeAiOverrides(state.aiOverrides);
   }, [state.isLoaded, state.aiOverrides]);
 
+  // Persist the AI-card archive to its own localStorage key
+  const prevAiCardsRef = useRef(state.aiCards);
+  useEffect(() => {
+    if (state.aiCards === prevAiCardsRef.current) return;
+    prevAiCardsRef.current = state.aiCards;
+    writePersistedAiCards(state.aiCards);
+  }, [state.aiCards]);
+
   // Apply theme
   useEffect(() => {
     if (!state.isLoaded) return;
@@ -329,7 +376,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [state.isLoaded, state.data.settings.theme]);
 
-  // Merged view: user cards + AI cards with user overrides applied (AI cards not persisted)
+  // Merged view: user cards + accumulated AI cards with user overrides applied
   const allCards = useMemo(
     () => [...state.data.cards, ...applyAiOverrides(state.aiCards, state.aiOverrides)],
     [state.data.cards, state.aiCards, state.aiOverrides]
