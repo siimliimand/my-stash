@@ -34,12 +34,14 @@
     //                   is executed from here (run_requests table in D1).
     // Both fire at 05:00:00; the pipeline's D1 run lock turns the overlap
     // into a no-op skip for whichever fire comes second.
-    // NOTE: cron delivery is currently NOT arriving for this worker — the
-    // triggers are registered correctly, but zero scheduled events have been
-    // observed (platform issue under investigation, README "Deviations" #18).
-    // Until that is resolved, POST /api/run-sync is the working execution
-    // path; both crons resume automatically if delivery resumes. The queue/
-    // poller machinery above is correct and simply dormant.
+    // NOTE (2026-09-27): an earlier NOTE here claimed cron events were not
+    // being delivered — that was a misdiagnosis. GraphQL analytics shows both
+    // crons firing (the */15 poller all day, the daily batch at 05:00 UTC);
+    // the runs died in ~1 s because a deploy had dropped OPENROUTER_API_KEY
+    // off the active version. The crons are the primary execution path;
+    // POST /api/run-sync is the manual trigger/fallback. After every deploy,
+    // check GET /api/stats ("hasOpenrouterKey": true) to confirm the secrets
+    // made it onto the new version (README "Deviations" #18).
     "crons": ["0 5 * * *", "*/15 * * * *"]
   },
   "vars": {

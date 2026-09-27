@@ -26,6 +26,12 @@ export async function handleStats(_request: Request, env: Env, cors: CorsHeaders
       lastBatchGenerated: lastGenerated,
       categoryBreakdown: aggregates.categoryBreakdown,
       topicMapVersion: topicMap?.version ?? 0,
+      // Presence only — never the value. A `false` here is the smoking gun for
+      // the 2026-09-27 outage class: a deploy that did not carry the secret
+      // onto the active version, so every generation attempt dies instantly
+      // with "OPENROUTER_API_KEY is not set on the Worker" while reads keep
+      // working. Check this right after every `wrangler deploy`.
+      hasOpenrouterKey: env.OPENROUTER_API_KEY !== undefined && env.OPENROUTER_API_KEY.length > 0,
     },
     cors,
     { cacheControl: STATS_CACHE_CONTROL },

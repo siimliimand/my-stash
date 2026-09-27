@@ -119,13 +119,16 @@ export async function handleGenerate(request: Request, env: Env, cors: CorsHeade
  * POST /api/run-sync — synchronous generation trigger: AWAITS the pipeline
  * inside the HTTP request instead of queueing it for a cron.
  *
- * WHY this exists: cron events are not being delivered for this worker —
- * both triggers are registered correctly yet zero `scheduled` invocations
- * arrive (an every-minute trigger sat for 10+ minutes of `wrangler tail`
- * with no scheduled event while HTTP requests kept flowing), so neither the
- * 05:00 batch nor #17's 15-minute poller can execute anything. That is a platform
- * issue under investigation (README "Deviations" #18); until it is resolved,
- * this endpoint is the working execution path.
+ * WHY this exists: it was built while an apparent "cron events not delivered"
+ * outage (README "Deviations" #18) blocked both the 05:00 batch and #17's
+ * poller. Diagnosed 2026-09-27 against Cloudflare's GraphQL analytics: the
+ * crons were firing all along — the runs died in ~1 s because a deploy had
+ * dropped OPENROUTER_API_KEY off the active version, and the instant failure
+ * was invisible to the `wrangler tail` session that "proved" no scheduled
+ * events arrived. With delivery confirmed working, the crons are the primary
+ * path; this endpoint stays as the manual trigger (on-demand batches, retries,
+ * and post-deploy sanity checks). Check GET /api/stats ("hasOpenrouterKey")
+ * after every deploy so a dropped secret is caught before the next 05:00.
  *
  * WHY inline is safe here when #17's `ctx.waitUntil` was not: the ~30 s kill
  * applies only to promises still running AFTER the response has been sent —

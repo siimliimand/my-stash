@@ -8,9 +8,8 @@
  *                          run for the poller; the synchronous alternative
  *                          is /api/run-sync)
  *   POST /api/run-sync     admin trigger that AWAITS the pipeline inline —
- *                          cron events are currently not delivered for this
- *                          worker (README "Deviations" #18), so this is the
- *                          working execution path
+ *                          the manual path when you don't want to wait up to
+ *                          15 minutes for the poller (README "Deviations" #18)
  *
  * Crons:
  *   0 5 * * *      daily generation batch (05:00 UTC)
@@ -18,7 +17,9 @@
  *                  /api/generate) inside a cron invocation's 15-minute
  *                  budget — waitUntil on an HTTP fetch event is killed ~30 s
  *                  after the response, too short for the ~77 s pipeline.
- *                  (Currently dormant: see /api/run-sync above.)
+ *                  (Cron delivery verified working 2026-09-27 — the earlier
+ *                  "crons not delivered" report was a misdiagnosis of a
+ *                  dropped OPENROUTER_API_KEY secret; see #18.)
  *
  * When OPENROUTER_API_KEY is unset the read endpoints keep working — only
  * generation returns 503 (PM override of plan §13; documented in README).

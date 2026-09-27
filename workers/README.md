@@ -121,17 +121,27 @@ Run from `workers/`. Replace the three placeholders in `wrangler.jsonc` first:
    curl https://my-stash-api.workers.dev/api/stats
    ```
 
-   While cron events are not being delivered for this worker (see deviation
-   #18), the poller never fires — trigger the batch synchronously instead:
+   An empty body uses the daily default (2 cards per category, 16 total);
+   `{ "requested": n }` overrides it (clamped 1–50).
+
+   To run a batch immediately instead of waiting for the poller, use the
+   synchronous twin (responds only when the batch is done, ~90 s):
 
    ```bash
    curl -X POST https://my-stash-api.workers.dev/api/run-sync \
      -H "Authorization: Bearer $ADMIN_SECRET"
-   # -> 200 {"status":"completed","batchDate":"2026-09-25",...} after ~90 s
+   # -> 200 {"status":"completed","batchDate":"2026-09-25",...}
    ```
 
-   An empty body uses the daily default (2 cards per category, 16 total);
-   `{ "requested": n }` overrides it (clamped 1–50).
+   After every deploy, confirm the secrets survived onto the new version —
+   a dropped `OPENROUTER_API_KEY` makes every generation attempt die in ~1 s
+   with "OPENROUTER_API_KEY is not set on the Worker" while read endpoints
+   keep working (this caused the 2026-09-27 outage — see deviation #18):
+
+   ```bash
+   curl https://my-stash-api.workers.dev/api/stats | jq .hasOpenrouterKey
+   # -> true
+   ```
 
 8. Point the frontend at the Worker: set
    `NEXT_PUBLIC_API_URL=https://my-stash-api.workers.dev` in the Pages
@@ -183,15 +193,14 @@ Notes:
   was already done or another run holds the D1 lock, and
   `502 {"error":"generation_failed", ...}` when the run failed or crashed
   (the attempt is already logged in `generation_log`; a failed day stays
-  retryable). It exists because cron events are currently not delivered for
-  this worker — see deviation #18.
+  retryable). It was built during the misdiagnosed "crons not delivered"
+  outage and kept as the on-demand trigger — see deviation #18.
 - Cron triggers are `["0 5 * * *", "*/15 * * * *"]`: the daily batch, plus the
   poller that executes queued manual runs. Both fire at 05:00:00; the D1 run
   lock turns that overlap into a no-op skip for the second fire (it only
-  warns — no rows are written). Currently, however, no cron events are being
-  delivered at all (registered but zero scheduled events observed — see
-  deviation #18), so `POST /api/run-sync` is the working execution path until
-  delivery resumes.
+  warns — no rows are written). Delivery was verified working on 2026-09-27
+  via Cloudflare's GraphQL analytics; the earlier "no scheduled events"
+  observation was a misdiagnosis (see deviation #18).
 - When `OPENROUTER_API_KEY` is unset, the read endpoints keep working; only
   generation returns `503 {"error":"generation not configured"}` (see
   deviations).
@@ -337,30 +346,40 @@ stricter-prompt retry; if every attempt still fails, the thrown error mentions
     instead of dangling in the queue). The daily 05:00 batch is unchanged; when
     both crons fire together at 05:00:00, the D1 run lock makes the second
     fire a `lock-held` skip that writes nothing.
-18. **Cron triggers are registered, but no cron events are being delivered;
-    `POST /api/run-sync` added as the synchronous execution path** — on the
-    deployed worker both triggers were registered correctly, yet 10+ minutes
-    of `wrangler tail` showed zero `scheduled` invocations while ordinary
-    HTTP requests kept flowing (an every-minute trigger was added as a
-    diagnostic and produced no events either — the platform is not delivering
-    cron events for this worker at all; investigation ongoing). Until
-    delivery resumes, neither the 05:00 batch nor #17's poller can execute
-    anything, so `/api/run-sync` runs the pipeline synchronously inside the
-    HTTP request: same admin bearer auth and optional `{ "requested": n }`
-    body as `/api/generate`, but it awaits `runGeneration` and returns the
-    outcome — `200 {"status":"completed", ...}`, `200
-    {"status":"already_completed", ...}` when the guard/lock skipped the run,
-    or `502 {"error":"generation_failed", ...}` when it failed or crashed.
-    Inlining is safe even though #17 showed post-response `waitUntil` is
-    killed at ~30 s: that ceiling applies only to promises still running
-    AFTER the response — an in-flight awaited request keeps the isolate alive
-    with no such ceiling, and the pipeline is I/O-bound (~90 s wall, ~0 ms
-    CPU, well under the free tier's 10 ms CPU cap). Concurrent or duplicate
-    invocations stay safe without the queue: the D1 run lock (#13) plus the
-    idempotency guard make every loser a `lock-held`/`already_completed`
-    no-op. The crons remain registered and dormant-safe — the queue/poller
-    machinery is untouched (its diagnostic every-minute cadence was reverted
-    to `*/15`), and both resume automatically if delivery resumes:
+18. **"Cron events not delivered" was a MISDIAGNOSIS — the real outage was a
+    dropped `OPENROUTER_API_KEY` secret; `POST /api/run-sync` kept as the
+    manual trigger** — on 2026-09-26 it was believed that cron events were not
+    being delivered at all, based on 10+ minutes of `wrangler tail` showing
+    zero `scheduled` invocations. Diagnosed 2026-09-27 against Cloudflare's
+    own data, the crons were firing all along: the schedules API showed both
+    triggers registered on the deployed worker, and the GraphQL analytics
+    (`workersInvocationsAdaptive`) showed the `*/15` poller invoking every 15
+    minutes around the clock plus the daily batch at 05:00 UTC on both
+    mornings. What actually happened: the runs died ~1 s into the pipeline
+    with `OPENROUTER_API_KEY is not set on the Worker` — a deploy had put a
+    new version live without the secret carried over (the AI env check is the
+    first thing the pipeline hits, and an instant failure is invisible unless
+    you look). Two telltales were misread as "no cron events": the tail
+    session was watched at a time when the poller had nothing queued (a
+    no-op poller still logs its cron line — it just wasn't noticed), and the
+    05:00 batch failure was only discoverable in `generation_log`.
+    Remediation: re-put the secrets (`npx wrangler secret put`) after any
+    deploy that drops them, and check `GET /api/stats`'s `hasOpenrouterKey`
+    boolean (never the value) right after every deploy.
+    `/api/run-sync` stays as the synchronous, secret-gated trigger for
+    on-demand batches and retries: same admin bearer auth and optional
+    `{ "requested": n }` body as `/api/generate`, but it awaits
+    `runGeneration` and returns the outcome — `200 {"status":"completed",
+    ...}`, `200 {"status":"already_completed", ...}` when the guard/lock
+    skipped the run, or `502 {"error":"generation_failed", ...}` when it
+    failed or crashed. Inlining is safe even though #17 showed post-response
+    `waitUntil` is killed at ~30 s: that ceiling applies only to promises
+    still running AFTER the response — an in-flight awaited request keeps the
+    isolate alive with no such ceiling, and the pipeline is I/O-bound (~90 s
+    wall, ~0 ms CPU, well under the free tier's 10 ms CPU cap). Concurrent or
+    duplicate invocations stay safe without the queue: the D1 run lock (#13)
+    plus the idempotency guard make every loser a
+    `lock-held`/`already_completed` no-op:
 
     ```bash
     curl -X POST https://my-stash-api.workers.dev/api/run-sync \
