@@ -20,6 +20,7 @@ import { Card, SortMode } from "@/lib/types";
 import { MarkdownLite, estimateReadTime } from "@/lib/markdown";
 import { CardModal } from "./CardModal";
 import { StashPopover } from "./StashPopover";
+import { SpeakButton } from "./SpeakButton";
 import { cn } from "@/lib/utils";
 
 const SWIPE_THRESHOLD = 80;
@@ -299,6 +300,11 @@ function SwipeableCard({
               className={cn("h-4 w-4 transition-colors", card.favorite ? "fill-red-500 text-red-500" : "")}
             />
           </Button>
+
+          {/* Read aloud */}
+          <SpeakButton
+            text={[card.title, card.body].filter(Boolean).join(". ")}
+          />
 
           {/* Stash to */}
           <StashPopover cardId={card.id} />

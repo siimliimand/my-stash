@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { useApp } from "@/context/AppContext";
 import { Card } from "@/lib/types";
 import { MarkdownLite, estimateReadTime } from "@/lib/markdown";
+import { SpeakButton } from "./SpeakButton";
 import { cn } from "@/lib/utils";
 
 const REVIEW_BATCH_SIZE = 7;
@@ -46,6 +47,10 @@ export function ReviewMode({ onClose }: ReviewModeProps) {
 
   const card = reviewCards[index];
   const total = reviewCards.length;
+
+  useEffect(() => {
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  }, []);
 
   useEffect(() => {
     if (!card) return;
@@ -203,6 +208,13 @@ export function ReviewMode({ onClose }: ReviewModeProps) {
                 </Button>
 
                 <div className="flex gap-2">
+                  <SpeakButton
+                    text={
+                      revealed
+                        ? [card.title, card.body].filter(Boolean).join(". ")
+                        : card.title
+                    }
+                  />
                   <Button
                     variant="ghost"
                     size="icon"
