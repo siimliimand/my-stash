@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { splitSentences } from "@/lib/markdown";
 
 /** Strip markdown-lite syntax (**bold**, *italic*, list markers) so the
  * speech engine reads clean prose. Mirrors the syntax parsed by
@@ -13,6 +14,51 @@ export function stripMarkdownForSpeech(text: string): string {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+const MAX_CHUNK_LENGTH = 180;
+
+function hardWrap(text: string, max: number): string[] {
+  const words = text.split(" ");
+  const parts: string[] = [];
+  let current = "";
+  for (const word of words) {
+    if (current && current.length + 1 + word.length > max) {
+      parts.push(current);
+      current = word;
+    } else {
+      current = current ? `${current} ${word}` : word;
+    }
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+/** Chrome stalls single utterances longer than ~15 seconds, so text is
+ * queued as sentence-sized chunks instead. Chunk boundaries fall on
+ * sentence ends, which keeps the inter-utterance pause inaudible. */
+function chunkForSpeech(text: string): string[] {
+  const sentences = splitSentences(text);
+  const chunks: string[] = [];
+  let current = "";
+  for (const sentence of sentences) {
+    if (sentence.length > MAX_CHUNK_LENGTH) {
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+      chunks.push(...hardWrap(sentence, MAX_CHUNK_LENGTH));
+      continue;
+    }
+    if (current && current.length + 1 + sentence.length > MAX_CHUNK_LENGTH) {
+      chunks.push(current);
+      current = sentence;
+    } else {
+      current = current ? `${current} ${sentence}` : sentence;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
 }
 
 interface UseSpeechResult {
@@ -40,68 +86,57 @@ export function useSpeech(): UseSpeechResult {
     getSpeechSupported,
     getSpeechSupportedServer,
   );
-  const keepAlive = useRef<number | null>(null);
-  const active = useRef<SpeechSynthesisUtterance | null>(null);
+  const session = useRef(0);
+  const queue = useRef<SpeechSynthesisUtterance[]>([]);
 
   useEffect(() => {
     const synth = "speechSynthesis" in window ? window.speechSynthesis : null;
     return () => {
-      if (keepAlive.current !== null) window.clearInterval(keepAlive.current);
+      queue.current = [];
       synth?.cancel();
     };
   }, []);
 
-  const clearKeepAlive = useCallback(() => {
-    if (keepAlive.current !== null) {
-      window.clearInterval(keepAlive.current);
-      keepAlive.current = null;
-    }
-  }, []);
-
   const stop = useCallback(() => {
     if (!("speechSynthesis" in window)) return;
-    active.current = null;
-    clearKeepAlive();
+    session.current++;
+    queue.current = [];
     setSpeaking(false);
     window.speechSynthesis.cancel();
-  }, [clearKeepAlive]);
+  }, []);
 
-  const speak = useCallback(
-    (text: string) => {
-      if (!("speechSynthesis" in window)) return;
-      const synth = window.speechSynthesis;
-      const clean = stripMarkdownForSpeech(text);
-      if (!clean) return;
+  const speak = useCallback((text: string) => {
+    if (!("speechSynthesis" in window)) return;
+    const synth = window.speechSynthesis;
+    const clean = stripMarkdownForSpeech(text);
+    if (!clean) return;
 
-      synth.cancel();
-      clearKeepAlive();
+    session.current++;
+    const mySession = session.current;
+    queue.current = [];
+    synth.cancel();
 
-      const utterance = new SpeechSynthesisUtterance(clean);
+    const finish = () => {
+      if (session.current !== mySession) return;
+      session.current++;
+      queue.current = [];
+      setSpeaking(false);
+    };
+
+    const chunks = chunkForSpeech(clean);
+    chunks.forEach((chunk, i) => {
+      const utterance = new SpeechSynthesisUtterance(chunk);
       utterance.lang = navigator.language || "en-US";
-      active.current = utterance;
-
-      const finish = () => {
-        if (active.current !== utterance) return;
-        active.current = null;
-        clearKeepAlive();
-        setSpeaking(false);
-      };
-      utterance.onend = finish;
-      utterance.onerror = finish;
-
-      // Chrome stalls long utterances (~15s); nudge the engine along.
-      keepAlive.current = window.setInterval(() => {
-        if (synth.speaking) {
-          synth.pause();
-          synth.resume();
-        }
-      }, 12000);
-
+      if (i === chunks.length - 1) {
+        utterance.onend = finish;
+        utterance.onerror = finish;
+      }
+      queue.current.push(utterance);
       synth.speak(utterance);
-      setSpeaking(true);
-    },
-    [clearKeepAlive],
-  );
+    });
+
+    setSpeaking(true);
+  }, []);
 
   const toggle = useCallback(
     (text: string) => {
