@@ -39,7 +39,7 @@ const SEED_CARDS: Omit<Card, "id" | "createdAt" | "updatedAt" | "origin">[] = [
   },
   {
     title: "The Eisenhower Matrix",
-    body: "**Prioritize tasks by urgency and importance**, not just urgency alone. President Eisenhower distinguished between the two:\n\n| | Urgent | Not Urgent |\n|---|---|---|\n| **Important** | Do now | Schedule it |\n| **Not Important** | Delegate | Eliminate |\n\nMost people live in the \"urgent but not important\" quadrant — meetings, interruptions, emails. The real leverage is in \"important but not urgent\": strategy, relationships, learning.\n\n- Ask: *is this actually important, or just feels urgent?*\n- Guard time for Quadrant II ruthlessly",
+    body: "**Prioritize tasks by urgency and importance**, not just urgency alone. President Eisenhower distinguished between the two:\n\n- **Urgent + Important** — do now\n- **Important, not urgent** — schedule it (this is where leverage lives)\n- **Urgent, not important** — delegate or decline\n- **Neither** — eliminate\n\nMost people live in the \"urgent but not important\" quadrant — meetings, interruptions, emails. The real leverage is in \"important but not urgent\": strategy, relationships, learning.\n\n- Ask: *is this actually important, or just feels urgent?*\n- Guard time for Quadrant II ruthlessly",
     source: "First Things First — Stephen R. Covey",
     tags: ["Productivity"],
     favorite: false,

@@ -375,7 +375,7 @@ function stubFetch(script: AiScript): void {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-async function runCron(h: TestHarness, cron = '0 5 * * *'): Promise<void> {
+async function runCron(h: TestHarness, cron = '5 5 * * *'): Promise<void> {
   const controller = {
     cron,
     scheduledTime: Date.now(),
@@ -1223,11 +1223,11 @@ describe('manual run queue (POST /api/generate → run_requests → */15 poller)
     expect(h.db.count('generation_log')).toBe(1); // only the cron's row
   });
 
-  test('daily cron (0 5 * * *) with NO pending request still runs the pipeline', async () => {
+  test('daily cron (5 5 * * *) with NO pending request still runs the pipeline', async () => {
     stubFetch(defaultScript);
     expect(h.db.count('run_requests')).toBe(0);
 
-    await runCron(h); // helper fires controller.cron = '0 5 * * *'
+    await runCron(h); // helper fires controller.cron = '5 5 * * *'
 
     expect(h.db.count('generated_cards')).toBe(16);
     expect(h.db.count('generation_log')).toBe(1);

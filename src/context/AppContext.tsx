@@ -5,6 +5,7 @@ import { AppData, Card, Stash, SortMode, FilterMode } from "@/lib/types";
 import { readStorage, writeStorage, writeStorageImmediate } from "@/lib/storage";
 import { createSeedData } from "@/lib/seed";
 import { fetchTodayCards, fetchArchiveCards, isApiConfigured } from "@/lib/api";
+import { latestAiBatchDate, isLatestAiBatch } from "@/lib/utils";
 import {
   AiCardOverrides,
   EMPTY_AI_OVERRIDES,
@@ -397,7 +398,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         cards = cards.filter((c) => idSet.has(c.id));
       }
     } else if (filter.type === "ai-today") {
-      cards = cards.filter((c) => c.origin === "ai");
+      // "AI Daily" = the most recent batch only; older AI cards remain
+      // reachable via All / tags / search.
+      const batchDate = latestAiBatchDate(allCards);
+      cards = cards.filter((c) => isLatestAiBatch(c, batchDate));
     }
 
     // Filter by search

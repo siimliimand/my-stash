@@ -25,24 +25,32 @@
     }
   ],
   "triggers": {
-    // "0 5 * * *"     — the daily generation batch (05:00 UTC).
+    // "5 5 * * *"     — the daily generation batch (05:05 UTC).
     // "*/15 * * * *"  — poller that executes manual runs queued by
     //                   POST /api/generate. waitUntil promises on an HTTP
     //                   fetch event are killed ~30 s after the response on the
     //                   real runtime, while the pipeline needs ~77 s — a cron
     //                   invocation gets a 15-minute budget, so the manual run
     //                   is executed from here (run_requests table in D1).
-    // Both fire at 05:00:00; the pipeline's D1 run lock turns the overlap
-    // into a no-op skip for whichever fire comes second.
-    // NOTE (2026-09-27): an earlier NOTE here claimed cron events were not
-    // being delivered — that was a misdiagnosis. GraphQL analytics shows both
-    // crons firing (the */15 poller all day, the daily batch at 05:00 UTC);
-    // the runs died in ~1 s because a deploy had dropped OPENROUTER_API_KEY
-    // off the active version. The crons are the primary execution path;
-    // POST /api/run-sync is the manual trigger/fallback. After every deploy,
-    // check GET /api/stats ("hasOpenrouterKey": true) to confirm the secrets
-    // made it onto the new version (README "Deviations" #18).
-    "crons": ["0 5 * * *", "*/15 * * * *"]
+    // The daily batch moved 0 5 -> 5 5 on 2026-09-28: every 0 5 fire for
+    // three mornings ran STALE state (pre-16/day code + no secrets, i.e. the
+    // worker as it existed when that trigger was first created on 09-25
+    // 18:37), while */15 fires and HTTP requests ran the current version —
+    // see README "Deviations" #21. A new expression is a new trigger row with
+    // a fresh creation timestamp, which forces the scheduler to re-materialize
+    // it. It also removes the 05:00:00 double-fire overlap with the poller.
+    //
+    // KNOWN PHANTOM (as of 2026-09-29): a stale trigger STILL fires daily at
+    // ~05:00:17Z running the 09-25 version (no secrets, requested=50). It
+    // generates 0 cards and only writes one misleading `failed` row to
+    // generation_log ~5 min before the real 05:05 batch succeeds — harmless
+    // to data. It is invisible to GET /schedules (only 5 5 + */15 exist) and
+    // undeleteable with the wrangler OAuth token ("method not allowed for
+    // this authentication scheme"). To kill it: create an API token with
+    // Workers Scripts:Edit and DELETE /accounts/{acc}/workers/scripts/
+    // my-stash-api/schedules — or remove it in dash.cloudflare.com under
+    // this worker's Settings → Triggers if it is listed there.
+    "crons": ["5 5 * * *", "*/15 * * * *"]
   },
   "vars": {
     // "~" prefix is OpenRouter's family alias — resolves to the latest Luna model.

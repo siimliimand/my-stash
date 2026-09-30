@@ -147,7 +147,7 @@ Run from `workers/`. Replace the three placeholders in `wrangler.jsonc` first:
    `NEXT_PUBLIC_API_URL=https://my-stash-api.workers.dev` in the Pages
    environment and redeploy Pages.
 
-9. Verify the cron (`0 5 * * *`, 05:00 UTC) next day via the Workers
+9. Verify the cron (`5 5 * * *`, 05:05 UTC) next day via the Workers
    dashboard -> Triggers, or by checking `wrangler tail` output and
    `GET /api/stats` (`totalBatches` should increment).
 
@@ -179,7 +179,7 @@ Notes:
   written to the `run_requests` D1 table and the `*/15 * * * *` cron poller
   consumes it (oldest first) and runs the pipeline inside a cron invocation's
   15-minute budget, so a manual run lands **within at most 15 minutes**, not
-  immediately. The daily 05:00 cron is unchanged. If another run (cron or
+  immediately. The daily 05:05 cron is unchanged. If another run (cron or
   admin) is already in flight, the pipeline skips itself with
   `status: "skipped", reason: "lock-held"` — a partial UNIQUE index on
   `generation_log(batch_date) WHERE status = 'running'` enforces one run per
@@ -195,12 +195,13 @@ Notes:
   (the attempt is already logged in `generation_log`; a failed day stays
   retryable). It was built during the misdiagnosed "crons not delivered"
   outage and kept as the on-demand trigger — see deviation #18.
-- Cron triggers are `["0 5 * * *", "*/15 * * * *"]`: the daily batch, plus the
-  poller that executes queued manual runs. Both fire at 05:00:00; the D1 run
-  lock turns that overlap into a no-op skip for the second fire (it only
-  warns — no rows are written). Delivery was verified working on 2026-09-27
-  via Cloudflare's GraphQL analytics; the earlier "no scheduled events"
-  observation was a misdiagnosis (see deviation #18).
+- Cron triggers are `["5 5 * * *", "*/15 * * * *"]`: the daily batch (05:05
+  UTC), plus the poller that executes queued manual runs. Delivery was
+  verified working on 2026-09-27 via Cloudflare's GraphQL analytics; the
+  earlier "no scheduled events" observation was a misdiagnosis (see
+  deviation #18). The daily trigger was re-created as `5 5 * * *` on
+  2026-09-28 after its `0 5 * * *` fires consistently ran stale worker state
+  (deviation #21).
 - When `OPENROUTER_API_KEY` is unset, the read endpoints keep working; only
   generation returns `503 {"error":"generation not configured"}` (see
   deviations).
@@ -343,9 +344,8 @@ stricter-prompt retry; if every attempt still fails, the thrown error mentions
     runs are now queued in a `run_requests` D1 table and executed by a new
     `*/15 * * * *` poller cron (claim-before-run: the row is deleted before the
     pipeline starts, so a failed attempt is recorded in `generation_log`
-    instead of dangling in the queue). The daily 05:00 batch is unchanged; when
-    both crons fire together at 05:00:00, the D1 run lock makes the second
-    fire a `lock-held` skip that writes nothing.
+    instead of dangling in the queue). The daily 05:05 batch is unchanged
+    (since 2026-09-28; see #21).
 18. **"Cron events not delivered" was a MISDIAGNOSIS — the real outage was a
     dropped `OPENROUTER_API_KEY` secret; `POST /api/run-sync` kept as the
     manual trigger** — on 2026-09-26 it was believed that cron events were not
@@ -427,3 +427,26 @@ stricter-prompt retry; if every attempt still fails, the thrown error mentions
     drop is surfaced as a run warning ("dropped N title(s) with
     non-canonical categories (…names…)"). The free-text `subcategory` field
     is deliberately untouched — only categories are enumerated.
+21. **Daily cron trigger re-created as `5 5 * * *` after its fires ran stale
+    worker state; batch moved 05:00 -> 05:05 UTC** — for three consecutive
+    mornings (2026-09-26/27/28) the 05:00 UTC fire ran the worker as it
+    existed when the `0 5 * * *` trigger was first registered (09-25
+    18:37:05, one second BEFORE the first `OPENROUTER_API_KEY` was put and on
+    the initial 50-card-default code): every fire failed in ~1 s with
+    "OPENROUTER_API_KEY is not set on the Worker" and logged
+    `requested: 50` even after the default had moved to 16 — while HTTP
+    requests and the `*/15` poller (registered later, 20:00:33) ran the
+    current version with secrets intact. Diagnosed 2026-09-28 by queuing a
+    1-card run and watching `wrangler tail`: the 05:45 poller invocation
+    reported `scriptVersion e9c1d624` (current) and made real AI calls —
+    proving scheduled invocations, bindings, and secrets all work; only the
+    long-lived `0 5 * * *` trigger was stale. An API PUT re-sync of the
+    schedules refreshed `modified_on` but preserved `created_on`, so the
+    trigger was changed to a NEW expression (`5 5 * * *`) via
+    `wrangler deploy`, which creates a fresh trigger row that re-materializes
+    current state (and incidentally removes the 05:00:00 double-fire overlap
+    with the poller). `index.ts` matches the new expression
+    (`controller.cron === '5 5 * * *'`). If a future cron fire ever runs
+    stale state again, the playbook is: re-create the trigger with a new
+    expression, then verify the next fire via `wrangler tail`
+    (`scriptVersion` must equal the active deployment) and `generation_log`.

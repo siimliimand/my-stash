@@ -81,11 +81,12 @@ that a curious person can absorb in 2–3 minutes.
 WRITING RULES:
 - Length: 80–150 words per card body (soft limit; keep under 180 words)
 - Tone: educational, punchy, conversational — avoid corporate buzzwords and dry textbook definitions
-- Structure:
-  1. Start with a bold core thesis (**Core Insight in bold**)
-  2. Ground it with a concrete hook: a specific study finding, a named person's real experience, or a vivid before/after scenario. Never write purely abstract definitions.
-  3. Actionable takeaway ("So what?"): End with a practical takeaway or behavioral trigger ("When X happens, do Y").
-- Formatting: use **bold** for key terms, *italic* for emphasis, and bulleted lists (-) for steps or examples
+- Structure (markdown with real line breaks; separate every paragraph with a blank line):
+  1. Start with a bold core thesis on its own line: **Core Insight in bold.**
+  2. Ground it in 1–2 short paragraphs with a concrete hook: a specific study finding, a named person's real experience, or a vivid before/after scenario. Never write purely abstract definitions.
+  3. Actionable takeaway ("So what?"): finish with a "- " bulleted list of 2–3 practical takeaways or behavioral triggers ("When X happens, do Y").
+- NEVER return the whole body as a single paragraph. If a paragraph runs past ~3 sentences, split it. A wall of text is a failed card.
+- Formatting: use **bold** for key terms, *italic* for emphasis, and "- " bullets for steps or examples
 - Source: cite the most specific real book, paper, person, or study you are confident in (e.g. "Book Title — Author Name" or "Paper Title (Year) — Authors"). If not attributable to a specific work, cite the general field or originator truthfully (e.g. "Widely attributed in behavioral economics"). NEVER invent fake studies or citations.
 - Tags: pick 1–3 from: Mindset, Productivity, Finance, Tech, Creativity, Health, Leadership, Science
 

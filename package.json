@@ -4,9 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/check-build-env.mjs",
     "build": "next build",
+    "build:local": "ALLOW_LOCAL_API=1 npm run build",
+    "deploy:web": "NEXT_PUBLIC_API_URL=https://my-stash-api.siim-liimand.workers.dev npm run build && node scripts/verify-build-output.mjs https://my-stash-api.siim-liimand.workers.dev && npx wrangler pages deploy out --project-name my-stash",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

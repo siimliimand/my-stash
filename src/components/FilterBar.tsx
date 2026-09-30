@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import { useApp } from "@/context/AppContext";
 import { FilterMode } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, latestAiBatchDate, isLatestAiBatch } from "@/lib/utils";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -25,7 +25,12 @@ export function FilterBar() {
     new Set([...DEFAULT_TAGS, ...allCards.flatMap((c) => c.tags)])
   ).sort();
 
-  const aiCount = allCards.filter((c) => c.origin === "ai").length;
+  // AI Daily counts only the most recent batch — the accumulated archive
+  // stays reachable via All / tags / search.
+  const aiBatchDate = latestAiBatchDate(allCards);
+  const aiCount = aiBatchDate
+    ? allCards.filter((c) => isLatestAiBatch(c, aiBatchDate)).length
+    : 0;
 
   // Stash pills count only cards we can actually display: a stash may still
   // reference ids that are not in allCards (e.g. the API was unreachable and

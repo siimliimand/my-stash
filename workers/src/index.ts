@@ -12,14 +12,15 @@
  *                          15 minutes for the poller (README "Deviations" #18)
  *
  * Crons:
- *   0 5 * * *      daily generation batch (05:00 UTC)
+ *   5 5 * * *      daily generation batch (05:05 UTC)
  *   * /15 * * * *  poller that executes queued manual runs (POST
  *                  /api/generate) inside a cron invocation's 15-minute
  *                  budget — waitUntil on an HTTP fetch event is killed ~30 s
  *                  after the response, too short for the ~77 s pipeline.
- *                  (Cron delivery verified working 2026-09-27 — the earlier
- *                  "crons not delivered" report was a misdiagnosis of a
- *                  dropped OPENROUTER_API_KEY secret; see #18.)
+ *                  (The daily batch moved 0 5 -> 5 5 on 2026-09-28: every
+ *                  0 5 fire ran the worker as it existed when that trigger
+ *                  was first registered — stale code, no secrets. See
+ *                  README "Deviations" #18 and #21.)
  *
  * When OPENROUTER_API_KEY is unset the read endpoints keep working — only
  * generation returns 503 (PM override of plan §13; documented in README).
@@ -71,7 +72,7 @@ export default {
     console.log(`[cron] fired ${controller.cron} at ${new Date(controller.scheduledTime).toISOString()}`);
     try {
       const today = new Date(controller.scheduledTime).toISOString().slice(0, 10);
-      const isDailyCron = controller.cron === '0 5 * * *';
+      const isDailyCron = controller.cron === '5 5 * * *';
 
       // Claim a queued manual run BEFORE deciding (claim-before-run): the row
       // is deleted up front so it can never dangle — if the run then fails,
